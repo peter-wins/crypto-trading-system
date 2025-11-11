@@ -1,0 +1,45 @@
+# Development docker-compose file with hot reload
+
+version: '3.8'
+
+services:
+  # Only databases for development, run app locally with hot reload
+  postgres:
+    image: postgres:15-alpine
+    container_name: trading_postgres_dev
+    environment:
+      POSTGRES_DB: crypto_trading_dev
+      POSTGRES_USER: dev_user
+      POSTGRES_PASSWORD: dev_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+      - ./scripts/init_postgres.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dev_user"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    container_name: trading_redis_dev
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_dev_data:/data
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: trading_qdrant_dev
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_dev_data:/qdrant/storage
+
+volumes:
+  postgres_dev_data:
+  redis_dev_data:
+  qdrant_dev_data:

@@ -1,0 +1,31 @@
+# Prometheus configuration for trading system
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'trading-system'
+
+# Alerting configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+# Scrape configurations
+scrape_configs:
+  # Trading application metrics
+  - job_name: 'trading_app'
+    static_configs:
+      - targets: ['trading_app:8000']
+    metrics_path: '/metrics'
+
+  # PostgreSQL exporter (if added)
+  - job_name: 'postgres'
+    static_configs:
+      - targets: []  # Add postgres_exporter:9187 if installed
+
+  # Redis exporter (if added)
+  - job_name: 'redis'
+    static_configs:
+      - targets: []  # Add redis_exporter:9121 if installed

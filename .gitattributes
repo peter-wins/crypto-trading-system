@@ -1,0 +1,26 @@
+# Normalize line endings to LF and mark text files
+* text=auto eol=lf
+
+# Common types
+*.py   text eol=lf
+*.sh   text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.ts   text eol=lf
+*.tsx  text eol=lf
+*.js   text eol=lf
+*.css  text eol=lf
+*.scss text eol=lf
+
+# Prevent binary from being normalized
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+
+# Keep shell scripts executable bit if present
+*.sh   linguist-generated=false

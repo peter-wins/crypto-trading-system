@@ -1,0 +1,49 @@
+# Trading System Configuration Example
+# This file is for reference only. Actual configuration is loaded from .env file
+
+system:
+  environment: dev
+  loop_interval: 60  # seconds
+  enable_trading: false
+  log_level: INFO
+
+risk_management:
+  max_position_size: 0.2  # 20% of portfolio
+  max_daily_loss: 0.05  # 5%
+  max_drawdown: 0.15  # 15%
+  stop_loss_percentage: 5.0
+  take_profit_percentage: 10.0
+
+  # 杠杆限制配置
+  max_leverage_mainstream: 50  # BTC/ETH 最大杠杆倍数
+  max_leverage_altcoin: 20     # 其他币种最大杠杆倍数
+  high_leverage_warning: 25    # 高杠杆警告阈值
+
+trading_pairs:
+  - BTC/USDT
+  - ETH/USDT
+  - BNB/USDT
+
+timeframes:
+  - 1h
+  - 4h
+  - 1d
+
+strategy:
+  default_strategy: adaptive
+  rebalance_interval: 86400  # 24 hours in seconds
+  max_open_positions: 3
+
+# Layered Decision Architecture (新架构)
+layered_decision:
+  enabled: false  # 是否启用分层决策架构
+  strategist_interval: 3600  # 战略层运行间隔(秒), 默认1小时
+  trader_interval: 180  # 战术层运行间隔(秒), 默认3分钟
+  enable_news: false  # 是否启用新闻采集(较慢)
+  cryptopanic_api_key: ""  # CryptoPanic API Key (可选)
+
+monitoring:
+  prometheus_enabled: true
+  prometheus_port: 9090
+  grafana_enabled: true
+  grafana_port: 3000
