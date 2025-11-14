@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Protocol
 
 from src.core.exceptions import DecisionError, ToolExecutionError
 from src.core.logger import get_logger
-from src.decision.llm_client import LLMResponse, Message, ToolCall
+from src.services.llm import LLMResponse, Message, ToolCall
 from src.decision.prompts import PromptTemplates
 from src.decision.tools import SupportsMemoryRetrieval, ToolRegistry
 from src.models.performance import PerformanceMetrics

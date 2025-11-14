@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
-from src.perception.kline_config import (
+from src.services.kline.config import (
     KLINE_CONFIGS,
     DEFAULT_FETCH_STRATEGY,
     DataFetchStrategy,
@@ -89,7 +89,7 @@ class KlineDataManager:
             return
 
         self.running = True
-        self.logger.info("🚀 启动多周期K线采集任务")
+        self.logger.info("✓ [K线服务] 多周期采集任务已启动")
 
         # 为每个交易对和时间周期创建采集任务
         for symbol in self.symbols:
@@ -99,11 +99,11 @@ class KlineDataManager:
                 )
                 self._collection_tasks.append(task)
 
-                self.logger.info(
-                    f"  启动 {symbol} {timeframe} 采集任务 (间隔: {config.collection_interval}秒)"
+                self.logger.debug(
+                    f"✓ [K线服务] 已启动 {symbol} {timeframe} 采集任务 (间隔: {config.collection_interval}秒)"
                 )
 
-        self.logger.info(f"✅ 已启动 {len(self._collection_tasks)} 个采集任务")
+        self.logger.info(f"✓ [K线服务] 已启动 {len(self._collection_tasks)} 个采集任务")
 
     async def stop(self, timeout: float = 5.0) -> None:
         """停止所有采集任务"""
@@ -240,9 +240,6 @@ class KlineDataManager:
                     )
                     # 提交事务
                     await dao.session.commit()
-                    self.logger.debug(
-                        f"保存 {symbol} {timeframe} {saved_count} 根K线到数据库"
-                    )
                 except Exception as db_error:
                     # 回滚事务
                     if dao and dao.session:
@@ -263,9 +260,6 @@ class KlineDataManager:
                         klines=klines
                     )
                     await self.dao.session.commit()
-                    self.logger.debug(
-                        f"保存 {symbol} {timeframe} {saved_count} 根K线到数据库"
-                    )
                 except Exception as db_error:
                     await self.dao.session.rollback()
                     self.logger.warning(
@@ -422,7 +416,7 @@ class KlineDataManager:
 
                     # 删除过期数据
                     from sqlalchemy import delete
-                    from src.database.models import KlineModel
+                    from src.services.database import KlineModel
 
                     result = await dao.session.execute(
                         delete(KlineModel).where(

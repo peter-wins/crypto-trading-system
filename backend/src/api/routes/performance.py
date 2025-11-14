@@ -107,106 +107,83 @@ def create_mock_equity_curve(
 # ===== API端点 =====
 
 @router.get("/performance/metrics", response_model=PerformanceMetricsResponse)
-async def get_performance_metrics():
+async def get_performance_metrics(
+    start_date: str | None = Query(None, description="开始日期 YYYY-MM-DD (UTC)"),
+    end_date: str | None = Query(None, description="结束日期 YYYY-MM-DD (UTC)"),
+):
     """
     获取绩效指标
 
-    返回当前的绩效统计指标
+    返回指定时间范围的绩效统计指标
+    如果不指定时间范围，返回全部历史数据的统计
+
+    注意：日期参数使用 UTC 时区
     """
-    logger.info("API: 获取绩效指标")
+    logger.info(f"API: 获取绩效指标 start={start_date} end={end_date}")
 
     try:
         from src.api.server import get_app_state
-        from src.database.dao import TradingDAO
+        from src.services.performance_service import PerformanceService
+        from datetime import date
 
         app_state = get_app_state()
         db_manager = app_state.get("db_manager")
 
         if not db_manager:
-            logger.warning("Database not initialized, returning mock data")
-            return create_mock_performance_metrics()
-
-        # 从数据库获取真实数据并计算指标
-        async with db_manager.get_session() as session:
-            dao = TradingDAO(session)
-
-            # 获取持仓数据和历史交易数据
-            positions = await dao.get_open_positions()
-            snapshots = await dao.get_portfolio_snapshots(limit=30)
-            closed_positions = await dao.get_closed_positions(limit=1000)  # 获取所有历史交易
-
-            # 如果没有足够数据，返回模拟数据
-            if len(snapshots) < 2:
-                logger.info("Not enough data for performance calculation, returning mock data")
-                return create_mock_performance_metrics()
-
-            # 计算基本统计（基于当前持仓的未实现盈亏）
-            unrealized_pnl = sum(float(p.unrealized_pnl) for p in positions)
-
-            # 计算已实现盈亏（从历史交易）
-            realized_pnl = sum(float(cp.realized_pnl) for cp in closed_positions)
-
-            # 总收益 = 已实现盈亏 + 未实现盈亏
-            total_return = realized_pnl + unrealized_pnl
-
-            # 计算总投入（从快照获取初始资金）
-            initial_value = float(snapshots[-1].total_value) if snapshots else 50000.0
-            total_return_percentage = (total_return / initial_value * 100) if initial_value > 0 else 0
-
-            # 计算最大回撤
-            values = [float(s.total_value) for s in reversed(snapshots)]
-            max_drawdown = 0
-            peak = values[0]
-            for value in values:
-                if value > peak:
-                    peak = value
-                drawdown = value - peak
-                if drawdown < max_drawdown:
-                    max_drawdown = drawdown
-            max_drawdown_percentage = (max_drawdown / peak * 100) if peak > 0 else 0
-
-            # 简化的夏普比率计算（使用日收益率）
-            returns = []
-            for i in range(1, len(values)):
-                daily_return = (values[i] - values[i-1]) / values[i-1]
-                returns.append(daily_return)
-
-            import statistics
-            avg_return = statistics.mean(returns) if returns else 0
-            std_return = statistics.stdev(returns) if len(returns) > 1 else 0.01
-            sharpe_ratio = (avg_return / std_return * (252 ** 0.5)) if std_return > 0 else 0  # 年化
-
-            # 从历史交易计算交易统计
-            total_trades = len(closed_positions)
-            profitable_trades = sum(1 for cp in closed_positions if float(cp.realized_pnl) > 0)
-            losing_trades = sum(1 for cp in closed_positions if float(cp.realized_pnl) < 0)
-            win_rate = (profitable_trades / total_trades * 100) if total_trades > 0 else 0.0
-
-            # 计算平均盈利和亏损
-            profits = [float(cp.realized_pnl) for cp in closed_positions if float(cp.realized_pnl) > 0]
-            losses = [float(cp.realized_pnl) for cp in closed_positions if float(cp.realized_pnl) < 0]
-            average_profit = statistics.mean(profits) if profits else 0.0
-            average_loss = statistics.mean(losses) if losses else 0.0
-
-            # 计算盈亏比
-            total_profit = sum(profits) if profits else 0.0
-            total_loss = abs(sum(losses)) if losses else 0.0
-            profit_factor = (total_profit / total_loss) if total_loss > 0 else 0.0
-
+            logger.warning("Database not initialized, returning zero values")
             return PerformanceMetricsResponse(
-                total_return=total_return,
-                total_return_percentage=total_return_percentage,
-                sharpe_ratio=sharpe_ratio,
-                max_drawdown=max_drawdown,
-                max_drawdown_percentage=max_drawdown_percentage,
-                win_rate=win_rate,
-                total_trades=total_trades,
-                profitable_trades=profitable_trades,
-                losing_trades=losing_trades,
-                average_profit=average_profit,
-                average_loss=average_loss,
-                profit_factor=profit_factor,
+                total_return=0.0,
+                total_return_percentage=0.0,
+                sharpe_ratio=0.0,
+                max_drawdown=0.0,
+                max_drawdown_percentage=0.0,
+                win_rate=0.0,
+                total_trades=0,
+                profitable_trades=0,
+                losing_trades=0,
+                average_profit=0.0,
+                average_loss=0.0,
+                profit_factor=0.0,
             )
+
+        # 解析日期参数
+        start_date_obj = None
+        end_date_obj = None
+        if start_date:
+            start_date_obj = date.fromisoformat(start_date)
+        if end_date:
+            end_date_obj = date.fromisoformat(end_date)
+
+        # 使用PerformanceService获取绩效摘要
+        from src.core.config import get_config
+        config = get_config()
+        exchange_name = "binanceusdm" if config.binance_futures else (config.data_source_exchange or "binance")
+
+        performance_service = PerformanceService(
+            db_manager=db_manager,
+            exchange_name=exchange_name
+        )
+
+        summary = await performance_service.get_performance_summary(
+            start_date=start_date_obj,
+            end_date=end_date_obj,
+            use_cache=True
+        )
+
+        return PerformanceMetricsResponse(
+            total_return=summary["total_return"],
+            total_return_percentage=summary["total_return_percentage"],
+            sharpe_ratio=summary["sharpe_ratio"],
+            max_drawdown=summary["max_drawdown"],
+            max_drawdown_percentage=summary["max_drawdown_percentage"],
+            win_rate=summary["win_rate"],
+            total_trades=summary["total_trades"],
+            profitable_trades=summary["profitable_trades"],
+            losing_trades=summary["losing_trades"],
+            average_profit=summary["average_profit"],
+            average_loss=summary["average_loss"],
+            profit_factor=summary["profit_factor"],
+        )
 
     except Exception as e:
         logger.error(f"获取绩效指标失败: {e}")
@@ -227,15 +204,16 @@ async def get_equity_curve(
 
     try:
         from src.api.server import get_app_state
-        from src.database.dao import TradingDAO
+        from src.services.database import TradingDAO
+        from src.core.config import get_config
         from datetime import date
 
         app_state = get_app_state()
         db_manager = app_state.get("db_manager")
 
         if not db_manager:
-            logger.warning("Database not initialized, returning mock data")
-            return create_mock_equity_curve(start_date, end_date)
+            logger.warning("Database not initialized, returning empty array")
+            return []
 
         # 解析日期参数
         start_date_obj = None
@@ -248,19 +226,62 @@ async def get_equity_curve(
         # 从数据库获取真实数据
         async with db_manager.get_session() as session:
             dao = TradingDAO(session)
+            config = get_config()
+            exchange_name = "binanceusdm" if config.binance_futures else (config.data_source_exchange or "binance")
             snapshots = await dao.get_portfolio_snapshots(
                 start_date=start_date_obj,
                 end_date=end_date_obj,
-                limit=365  # 最多返回一年的数据
+                limit=None,  # 有日期范围时不限制，返回该范围内所有数据
+                exchange_name=exchange_name,
             )
 
-            # 如果没有数据，生成模拟数据用于展示
+            # 获取初始资金配置
+            from sqlalchemy import text
+            initial_capital = None
+            initial_capital_time = None
+            result_ic = await session.execute(
+                text("SELECT initial_capital, set_at FROM account_settings WHERE exchange_id = (SELECT id FROM exchanges WHERE name = :name)"),
+                {"name": exchange_name}
+            )
+            ic_row = result_ic.fetchone()
+            if ic_row:
+                initial_capital = float(ic_row[0])
+                initial_capital_time = ic_row[1]
+
+            # 如果没有数据，返回空数组
             if len(snapshots) < 1:
-                logger.info(f"No snapshots found, generating mock data for visualization")
-                return create_mock_equity_curve(start_date, end_date)
+                logger.info(f"No snapshots found, returning empty array")
+                return []
+
+            # 如果查询单日且快照不足2个，补充前一天的最后快照
+            if len(snapshots) < 2 and start_date_obj and end_date_obj and start_date_obj == end_date_obj:
+                from datetime import timedelta
+                previous_day = start_date_obj - timedelta(days=1)
+                previous_snapshots = await dao.get_portfolio_snapshots(
+                    start_date=previous_day,
+                    end_date=previous_day,
+                    limit=1,  # 只要最新的一个
+                    exchange_name=exchange_name,
+                )
+                if previous_snapshots:
+                    # 将前一天的快照添加到列表开头（因为后面会reverse）
+                    snapshots.append(previous_snapshots[0])
+                    logger.debug(f"单日净值曲线快照不足，补充前一天快照: {previous_snapshots[0].datetime}")
 
             # 转换为响应格式
             result = []
+
+            # 如果有初始资金配置，添加为第一个点
+            if initial_capital and initial_capital_time:
+                if initial_capital_time.tzinfo is None:
+                    ic_time_with_tz = initial_capital_time.replace(tzinfo=timezone.utc)
+                else:
+                    ic_time_with_tz = initial_capital_time
+                result.append(EquityPointResponse(
+                    timestamp=ic_time_with_tz.isoformat(),
+                    value=initial_capital
+                ))
+
             for snapshot in reversed(snapshots):  # 从旧到新排序
                 # 确保时间戳包含时区信息
                 if snapshot.datetime:
@@ -299,7 +320,7 @@ async def get_trades_stats():
 
     try:
         from src.api.server import get_app_state
-        from src.database.dao import TradingDAO
+        from src.services.database import TradingDAO
 
         app_state = get_app_state()
         db_manager = app_state.get("db_manager")

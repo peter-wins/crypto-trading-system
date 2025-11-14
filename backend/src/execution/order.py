@@ -68,6 +68,7 @@ class CCXTOrderExecutor:
         self._lock = asyncio.Lock()
         self._orders: Dict[str, Order] = {}
         self._leverage_cache: Dict[str, int] = {}
+        self._should_close_exchange = False
 
     # ------------------------------------------------------------------ #
     # public API
@@ -553,6 +554,7 @@ class CCXTOrderExecutor:
                 logger.warning("Failed to close exchange connection: %s", exc)
             finally:
                 self._exchange = None
+                self._should_close_exchange = False
 
     # ------------------------------------------------------------------ #
     # 内部实现

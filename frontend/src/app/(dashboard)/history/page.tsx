@@ -21,7 +21,7 @@ import { ChevronLeft, ChevronRight } from "lucide-react"
 import { getSignalLabel } from "@/lib/utils/signal"
 
 export default function HistoryPage() {
-  const { data: decisions, isLoading } = useDecisionHistory()
+  const { data: decisions, isLoading, error } = useDecisionHistory(500)
   const [selectedDecision, setSelectedDecision] = useState<DecisionRecord | null>(null)
   const [searchTerm, setSearchTerm] = useState("")
   const [typeFilter, setTypeFilter] = useState<string>("all")
@@ -71,7 +71,7 @@ export default function HistoryPage() {
   const signalTypes = useMemo(() => {
     if (!decisions) return []
     const signals = new Set(
-      decisions.map((d) => d.signal).filter((s): s is string => !!s)
+      decisions.map((d) => d.signal).filter((s): s is NonNullable<typeof s> => !!s)
     )
     return Array.from(signals)
   }, [decisions])

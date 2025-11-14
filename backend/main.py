@@ -10,7 +10,14 @@ Main Entry Point (Refactored)
 import sys
 import asyncio
 import signal
+import warnings
 from pathlib import Path
+
+# 过滤 Python 关闭时的清理警告
+# 这些警告在程序正常退出时出现，是由于 Python 解释器关闭顺序导致的
+# 不影响程序功能，可以安全忽略
+warnings.filterwarnings('ignore', category=RuntimeWarning, message='.*was never awaited.*')
+warnings.filterwarnings('ignore', category=ResourceWarning, message='.*unclosed.*')
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -29,9 +36,7 @@ async def main():
     config = get_config()
     logger = get_logger(__name__)
 
-    logger.info("=" * 60)
-    logger.info("AI 自主加密货币交易系统")
-    logger.info("=" * 60)
+    logger.info("✓ [系统] 启动中...")
 
     builder = TradingSystemBuilder()
     coordinator = None
@@ -57,7 +62,7 @@ async def main():
         coordinator = await builder.build()
 
         # 运行系统（分层决策模式）
-        logger.info("使用分层决策模式运行")
+        logger.info("✓ [系统] 启动完成，开始运行分层决策模式")
         await coordinator.run_layered_decision_mode()
 
     except KeyboardInterrupt:
@@ -67,19 +72,16 @@ async def main():
         logger.critical(f"致命错误: {e}", exc_info=True)
         exit_code = 1
     finally:
-        # 清理资源
         if shutdown_task:
             await shutdown_task
         else:
             await builder.cleanup()
-
-    return exit_code
+        logger.info("📋 所有资源清理完毕，准备退出。")
+        return exit_code
 
 
 if __name__ == "__main__":
-    try:
-        exit_code = asyncio.run(main())
-        sys.exit(exit_code)
-    except KeyboardInterrupt:
-        print("\n收到中断，退出程序。")
-        sys.exit(0)
+    exit_code = asyncio.run(main())
+    import logging as _logging
+    _logging.shutdown()
+    sys.exit(exit_code)

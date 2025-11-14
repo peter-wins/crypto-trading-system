@@ -249,7 +249,7 @@ async def get_decision_history(
 
     try:
         from src.api.server import get_app_state
-        from src.database.dao import TradingDAO
+        from src.services.database import TradingDAO
 
         app_state = get_app_state()
         db_manager = app_state.get("db_manager")
@@ -280,7 +280,7 @@ async def get_decision(decision_id: str):
 
     try:
         from src.api.server import get_app_state
-        from src.database.dao import TradingDAO
+        from src.services.database import TradingDAO
 
         app_state = get_app_state()
         db_manager = app_state.get("db_manager")
@@ -321,7 +321,7 @@ async def get_latest_decision():
 
     try:
         from src.api.server import get_app_state
-        from src.database.dao import TradingDAO
+        from src.services.database import TradingDAO
 
         app_state = get_app_state()
         db_manager = app_state.get("db_manager")

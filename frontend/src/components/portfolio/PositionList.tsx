@@ -13,7 +13,7 @@ import { Badge } from "@/components/ui/badge"
 import { cn, formatCurrency, formatPercentage, isProfit } from "@/lib/utils"
 import { formatSymbol } from "@/lib/utils/symbol"
 import { TrendingUp, TrendingDown } from "lucide-react"
-import { Position } from "@/lib/types"
+import { Position } from "@/types/trading"
 
 interface PositionListProps {
   positions: Position[]

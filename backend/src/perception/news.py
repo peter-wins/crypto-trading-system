@@ -259,7 +259,7 @@ class NewsCollector:
 }}
 """
 
-            from src.decision.llm_client import Message
+            from src.services.llm import Message
 
             messages = [
                 Message(role="system", content="你是一个加密货币新闻分析专家。"),

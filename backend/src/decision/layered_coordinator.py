@@ -216,7 +216,7 @@ class LayeredDecisionCoordinator:
             get_portfolio_func: 获取持仓的函数
             signal_handler_func: 处理交易信号的函数
         """
-        logger.info("启动双层决策循环")
+        logger.info("✓ [分层决策] 双层决策循环已启动")
         logger.info(f"战略层周期: {self.strategist_interval}秒")
         logger.info(f"战术层周期: {self.trader_interval}秒")
 
@@ -324,7 +324,7 @@ class LayeredDecisionCoordinator:
             return
 
         try:
-            from src.database.dao import TradingDAO
+            from src.services.database import TradingDAO
             from src.models.decision import DecisionRecord
             import uuid
             import json
@@ -404,7 +404,7 @@ class LayeredDecisionCoordinator:
             return
 
         try:
-            from src.database.dao import TradingDAO
+            from src.services.database import TradingDAO
             from src.models.decision import DecisionRecord
             import uuid
             import json
@@ -519,57 +519,9 @@ class LayeredDecisionCoordinator:
         if not self.db_manager or not portfolio:
             return
 
-        try:
-            from src.database.dao import TradingDAO
-            from decimal import Decimal
-
-            async with self.db_manager.get_session() as session:
-                dao = TradingDAO(session)
-
-                # 1. 关闭所有已平仓的持仓记录
-                current_symbols = {p.symbol for p in portfolio.positions}
-
-                closed_count = await dao.close_positions_not_in_list(
-                    current_symbols=list(current_symbols),
-                    exchange_name="binance"
-                )
-                if closed_count > 0:
-                    logger.debug(f"  ✓ 已关闭 {closed_count} 个已平仓的持仓记录")
-
-                # 2. 保存每个持仓的快照
-                position_count = 0
-                logger.debug(f"准备保存 {len(portfolio.positions)} 个持仓")
-                for idx, position in enumerate(portfolio.positions):
-                    logger.debug(
-                        f"正在保存持仓 [{idx+1}/{len(portfolio.positions)}]: "
-                        f"{position.symbol} {position.side.value} {position.amount}"
-                    )
-                    success = await dao.save_position(
-                        position=position,
-                        exchange_name="binance"
-                    )
-                    if success:
-                        position_count += 1
-                        logger.debug(f"  ✓ 持仓 {position.symbol} 保存成功")
-                    else:
-                        logger.warning(f"  ✗ 持仓 {position.symbol} 保存失败")
-
-                # 2. 保存投资组合快照
-                portfolio_saved = await dao.save_portfolio_snapshot(
-                    portfolio=portfolio,
-                    exchange_name="binance"
-                )
-
-                if portfolio_saved:
-                    logger.debug(
-                        f"✅ 快照已保存: {position_count}/{len(portfolio.positions)} 个持仓, "
-                        f"总资产 {portfolio.total_value:.2f} USDT"
-                    )
-                else:
-                    logger.warning("保存投资组合快照失败")
-
-        except Exception as exc:
-            logger.warning(f"保存快照失败: {exc}")
+        # AccountSyncService 已负责 positions/closed_positions/portfolio_snapshots 的写入，
+        # 这里不再重复保存，避免交换所ID不一致。
+        return
 
     async def close(self):
         """关闭资源"""

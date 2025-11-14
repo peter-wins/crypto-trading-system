@@ -321,7 +321,7 @@ async def get_ohlcv(
 
     try:
         # TODO: 集成真实的市场数据采集器
-        # from src.perception.market_data import MarketDataCollector
+        # from src.services.market_data import MarketDataCollector
         # collector = MarketDataCollector()
         # ohlcv = await collector.get_ohlcv(symbol, timeframe, limit=limit)
         # return [convert_ohlcv_to_response(candle) for candle in ohlcv]

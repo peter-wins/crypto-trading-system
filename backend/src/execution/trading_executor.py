@@ -20,8 +20,8 @@ from src.execution.order import CCXTOrderExecutor
 from src.execution.risk import StandardRiskManager
 from src.execution.portfolio import PortfolioManager
 from src.memory.short_term import RedisShortTermMemory
-from src.database.session import DatabaseManager
-from src.database.dao import TradingDAO
+from src.services.database import DatabaseManager
+from src.services.database import TradingDAO
 from src.core.config import RiskConfig
 from src.core.exceptions import TradingSystemError
 
@@ -135,9 +135,11 @@ class TradingExecutor:
         Returns:
             True=信号有效, False=信号无效应忽略
         """
+        position_side = self._position_side_for_signal(signal)
+
         # 对于平仓信号,检查是否有持仓
         if signal.signal_type in [SignalType.EXIT_LONG, SignalType.EXIT_SHORT]:
-            current_position = portfolio.get_position(symbol)
+            current_position = portfolio.get_position(symbol, position_side)
             if not current_position:
                 self.logger.warning("%s 无持仓，平仓信号已忽略：%s", symbol, signal.signal_type.value)
                 return False
@@ -274,6 +276,12 @@ class TradingExecutor:
         # 映射交易对符号
         trading_symbol = self._map_symbol_for_trading(data_symbol)
 
+        position_side = self._position_side_for_signal(signal)
+
+        pre_position = None
+        if signal.signal_type in (SignalType.EXIT_LONG, SignalType.EXIT_SHORT):
+            pre_position = portfolio.get_position(data_symbol, position_side)
+
         amount = signal.suggested_amount
         if amount is None or amount <= Decimal("0"):
             self.logger.info("%s 信号数量无效，忽略。", trading_symbol)
@@ -320,10 +328,14 @@ class TradingExecutor:
             await self._create_protective_orders_if_needed(
                 trading_symbol, signal, snapshot, updated_portfolio, order_group
             )
-
-        # 注意：快照保存已移至 trading_coordinator.py 中所有信号执行完后统一保存
-        # 避免并行执行时每个信号都保存一次快照
-        # await self._save_portfolio_to_db(updated_portfolio)
+            await self._register_expected_close(
+                data_symbol,
+                position_side,
+                pre_position,
+                signal,
+                order,
+                entry_price,
+            )
 
         # 更新交易上下文
         await self._update_trading_context(data_symbol, strategy, updated_portfolio, snapshot)
@@ -496,12 +508,18 @@ class TradingExecutor:
             if not trades_data and not self.order_executor.paper_trading:
                 self.logger.debug("尝试从交易所API拉取成交记录...")
                 try:
-                    trades_data = await self.order_executor._exchange.fetch_order_trades(
-                        order.id, order.symbol
+                    # 币安合约使用 fetch_my_trades，然后筛选属于此订单的记录
+                    from src.services.exchange import get_exchange_service
+                    exchange_service = get_exchange_service()
+                    all_trades = await exchange_service.fetch_my_trades(
+                        symbol=order.symbol,
+                        limit=100  # 获取最近100笔成交
                     )
-                    self.logger.debug(f"从交易所API拉取到 {len(trades_data)} 条成交记录")
+                    # 筛选属于此订单的成交记录
+                    trades_data = [t for t in all_trades if str(t.get('order')) == str(order.id)]
+                    self.logger.debug(f"从交易所API拉取到 {len(trades_data)} 条成交记录 (订单 {order.id})")
                 except Exception as exc:
-                    self.logger.debug("无法拉取订单trades (可能交易所不支持): %s", exc)
+                    self.logger.debug("无法拉取订单trades: %s", exc)
                     trades_data = []
 
             # 3. 如果仍然没有trades，但订单已成交，则根据订单信息生成trade记录
@@ -645,7 +663,10 @@ class TradingExecutor:
             signal.signal_type in (SignalType.EXIT_LONG, SignalType.EXIT_SHORT)
             and (signal.stop_loss or signal.take_profit)
         ):
-            remaining_position = portfolio.get_position(symbol)
+            remaining_position = portfolio.get_position(
+                symbol,
+                self._position_side_for_signal(signal),
+            )
             if remaining_position and remaining_position.amount > Decimal("0"):
                 remaining_price = remaining_position.current_price or Decimal(str(snapshot["latest_price"]))
                 protective = await self.order_executor.create_protective_orders(
@@ -658,17 +679,52 @@ class TradingExecutor:
                 )
                 order_group.update(protective)
 
-    async def _save_portfolio_to_db(self, portfolio: Portfolio) -> None:
-        """保存组合快照到数据库"""
-        if not self.db_manager:
+    async def _register_expected_close(
+        self,
+        symbol: str,
+        position_side: Optional[OrderSide],
+        pre_position: Optional["Position"],
+        signal: TradingSignal,
+        order: Order,
+        fallback_price: Decimal,
+    ) -> None:
+        """通知 AccountSyncService 预计的平仓结果"""
+        if (
+            signal.signal_type not in (SignalType.EXIT_LONG, SignalType.EXIT_SHORT)
+            or not self.portfolio_manager
+            or not position_side
+            or not pre_position
+        ):
             return
 
+        account_sync = getattr(self.portfolio_manager, "account_sync_service", None)
+        if not account_sync:
+            return
+
+        exit_price = order.average or order.price or fallback_price or pre_position.current_price
+        if exit_price is None:
+            exit_price = fallback_price
+        exit_price = Decimal(str(exit_price))
+
+        timestamp = order.timestamp or int(datetime.now(timezone.utc).timestamp() * 1000)
+        exit_time = datetime.fromtimestamp(timestamp / 1000, tz=timezone.utc)
+
+        filled_amount = order.filled if order.filled > Decimal("0") else order.amount
+        closed_amount = min(pre_position.amount, filled_amount)
+
         try:
-            async with self.db_manager.get_session() as session:
-                dao = TradingDAO(session)
-                await dao.save_portfolio_snapshot(portfolio)
-        except Exception as exc:
-            self.logger.warning("保存组合快照到数据库失败: %s", exc)
+            close_reason = "manual" if signal.signal_type in (SignalType.EXIT_LONG, SignalType.EXIT_SHORT) else "system"
+            account_sync.register_expected_close(
+                symbol=symbol,
+                side=position_side,
+                amount=closed_amount,
+                exit_price=exit_price,
+                exit_time=exit_time,
+                order_id=order.id,
+                reason=close_reason,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            self.logger.debug("登记预期平仓失败 %s: %s", symbol, exc)
 
     async def _update_trading_context(
         self,
@@ -745,6 +801,14 @@ class TradingExecutor:
             return OrderSide.BUY
         else:
             return OrderSide.SELL
+
+    def _position_side_for_signal(self, signal: TradingSignal) -> Optional[OrderSide]:
+        """获取与信号对应的持仓方向"""
+        if signal.signal_type in (SignalType.ENTER_LONG, SignalType.EXIT_LONG):
+            return OrderSide.BUY
+        if signal.signal_type in (SignalType.ENTER_SHORT, SignalType.EXIT_SHORT):
+            return OrderSide.SELL
+        return None
 
     def _map_symbol_for_trading(self, data_symbol: str) -> str:
         """

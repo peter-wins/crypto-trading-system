@@ -2,7 +2,8 @@
 Decision module exports.
 """
 
-from .llm_client import DeepSeekClient, LLMResponse, Message, OpenAIClient, QwenClient, ToolCall
+# Re-export LLM clients from services for backward compatibility
+from src.services.llm import DeepSeekClient, LLMResponse, Message, OpenAIClient, QwenClient, ToolCall
 from .prompts import PromptTemplates
 from .strategist import LLMStrategist
 from .tools import (

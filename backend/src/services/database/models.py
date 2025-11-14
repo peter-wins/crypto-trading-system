@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime, date, timezone
 from sqlalchemy import (
     Column, String, Integer, Numeric, Boolean, DateTime, Date, BigInteger,
-    Text, ForeignKey, Index, CheckConstraint, ARRAY
+    Text, ForeignKey, Index, CheckConstraint, ARRAY, UniqueConstraint
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.declarative import declarative_base
@@ -141,6 +141,7 @@ class PositionModel(Base):
     # 杠杆和强平价格
     leverage = Column(Integer)
     liquidation_price = Column(Numeric(20, 8))
+    entry_fee = Column(Numeric(20, 8), default=0)
 
     # 订单关联
     entry_order_id = Column(String(100), ForeignKey('orders.id'))
@@ -157,6 +158,13 @@ class PositionModel(Base):
         Index('idx_positions_exchange', 'exchange_id'),
         Index('idx_positions_opened', 'opened_at'),
         Index('idx_positions_is_open', 'is_open'),
+        UniqueConstraint(
+            'exchange_id',
+            'symbol',
+            'side',
+            'is_open',
+            name='uq_positions_exchange_symbol_side_open'
+        ),
         CheckConstraint(
             "side IN ('long', 'short')",
             name='positions_side_check'
@@ -191,6 +199,9 @@ class PortfolioSnapshotModel(Base):
     timestamp = Column(BigInteger, nullable=False)
     datetime = Column(DateTime, nullable=False)
     created_at = Column(DateTime)
+    archive_reason = Column(String(50))
+    is_archive = Column(Boolean, default=False)
+    position_count = Column(Integer, default=0)
 
     __table_args__ = (
         Index('idx_portfolio_snapshots_date', 'snapshot_date'),
@@ -405,6 +416,9 @@ class ClosedPositionModel(Base):
     total_fee = Column(Numeric(20, 8))
     fee_currency = Column(String(10))
 
+    # 平仓原因
+    close_reason = Column(String(50))  # manual, stop_loss, take_profit, liquidation, system, unknown
+
     # 其他
     holding_duration_seconds = Column(Integer)
     leverage = Column(Integer)
@@ -420,6 +434,22 @@ class ClosedPositionModel(Base):
             "side IN ('buy', 'sell')",
             name='closed_positions_side_check'
         ),
+    )
+
+
+class AccountSettingsModel(Base):
+    """账户设置表"""
+    __tablename__ = "account_settings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    exchange_id = Column(Integer, ForeignKey('exchanges.id'), nullable=False, unique=True)
+    initial_capital = Column(Numeric(20, 8), nullable=False)
+    capital_currency = Column(String(10), default='USDT')
+    set_at = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
+    notes = Column(Text)
+
+    __table_args__ = (
+        Index('idx_account_settings_exchange', 'exchange_id'),
     )
 
 

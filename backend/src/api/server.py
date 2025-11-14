@@ -10,8 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from src.core.logger import get_logger
 from src.core.config import get_config
-from src.database.session import DatabaseManager
-from src.api.routes import portfolio, market, decisions, performance, history
+from src.services.database import DatabaseManager
+from src.api.routes import portfolio, market, decisions, performance, history, account, settings
 
 logger = get_logger(__name__)
 
@@ -99,6 +99,8 @@ app.include_router(market.router, prefix="/api", tags=["market"])
 app.include_router(decisions.router, prefix="/api", tags=["decisions"])
 app.include_router(performance.router, prefix="/api", tags=["performance"])
 app.include_router(history.router, prefix="/api", tags=["history"])
+app.include_router(account.router, prefix="/api", tags=["account"])
+app.include_router(settings.router, prefix="/api", tags=["settings"])
 
 
 @app.get("/")

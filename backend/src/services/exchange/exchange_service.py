@@ -73,6 +73,11 @@ class ExchangeService:
         logger.info(f"ExchangeService initialized for {self._exchange_name} (futures={self.config.binance_futures})")
         self._initialized = True
 
+    @property
+    def exchange_name(self) -> str:
+        """当前所使用的交易所标识"""
+        return self._exchange_name
+
     async def _get_exchange(self) -> ccxt.Exchange:
         """
         获取exchange实例（懒加载 + 连接复用）
@@ -293,6 +298,30 @@ class ExchangeService:
         exchange = await self._get_exchange()
         return await exchange.fetch_positions(symbols)
 
+    @api_call(max_retries=2, timeout=10.0)
+    async def fetch_my_trades(
+        self,
+        symbol: str,
+        since: Optional[int] = None,
+        limit: Optional[int] = None
+    ) -> List[Dict]:
+        """
+        获取我的成交记录
+
+        Args:
+            symbol: 交易对符号
+            since: 起始时间戳 (毫秒)
+            limit: 返回数量限制
+
+        Returns:
+            成交记录列表
+        """
+        limiter = self._rate_limiters.get_limiter(self._exchange_name)
+        await limiter.acquire()
+
+        exchange = await self._get_exchange()
+        return await exchange.fetch_my_trades(symbol, since, limit)
+
     # ==================== 杠杆和保证金相关 ====================
 
     @api_call(max_retries=2, timeout=10.0)
@@ -479,3 +508,15 @@ def get_exchange_service() -> ExchangeService:
     if _exchange_service is None:
         _exchange_service = ExchangeService()
     return _exchange_service
+
+
+async def close_exchange_service() -> None:
+    """关闭全局 ExchangeService 实例"""
+    global _exchange_service
+    if _exchange_service is not None:
+        try:
+            await _exchange_service.close()
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("关闭 ExchangeService 失败: %s", exc)
+        finally:
+            _exchange_service = None

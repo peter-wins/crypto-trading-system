@@ -7,9 +7,12 @@ and configuration files. It uses pydantic-settings for validation and type safet
 
 from typing import Dict, List, Optional
 from decimal import Decimal
+from pathlib import Path
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 import os
+
+ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
 
 
 class ExchangeConfig(BaseSettings):
@@ -199,6 +202,12 @@ class Config(BaseSettings):
         description="系统时区，例如: Asia/Dubai, Asia/Shanghai, America/New_York"
     )
 
+    # Account Configuration
+    initial_capital: Decimal = Field(
+        default=Decimal("0"),
+        description="初始资金（USDT），用于计算累计收益率。0表示自动从交易所获取"
+    )
+
     # Risk Parameters
     max_position_size: Decimal = Field(default=Decimal("0.2"))
     max_daily_loss: Decimal = Field(default=Decimal("0.05"))
@@ -245,7 +254,7 @@ class Config(BaseSettings):
     )
 
     model_config = SettingsConfigDict(
-        env_file="../.env",  # 从 backend/ 向上一级找 .env
+        env_file=str(ENV_FILE),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore"

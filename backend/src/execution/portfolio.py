@@ -57,12 +57,16 @@ class PortfolioManager:
         base_currency: str = "USDT",
         initial_portfolio: Optional[Portfolio] = None,
         sync_interval_seconds: int = 300,  # 默认5分钟同步一次
+        db_manager=None,  # DatabaseManager for reading synced data
+        account_sync_service=None,  # AccountSyncService for force sync
     ) -> None:
         self.exchange_id = exchange_id
         self.config = config or {}
         self.paper_trading = paper_trading
         self.base_currency = base_currency
         self.sync_interval_seconds = sync_interval_seconds
+        self.db_manager = db_manager
+        self.account_sync_service = account_sync_service
         # Note: 不再需要 self._exchange，改用全局 ExchangeService
         self._sync_lock = asyncio.Lock()  # 用于同步持仓的锁
         self._portfolio_cache: Optional[Portfolio] = initial_portfolio
@@ -84,13 +88,12 @@ class PortfolioManager:
         同步策略：
         - 纸面模式：总是使用缓存
         - 真实模式：
-          1. 如果 force_sync=True，强制从交易所同步
-          2. 如果距离上次同步超过 sync_interval_seconds，自动同步
-          3. 否则使用缓存（避免频繁API调用）
-          4. 并发请求时使用锁，确保同一时刻只有一个实际的API调用
+          1. 如果 force_sync=True，通过 AccountSyncService 强制同步交易所
+          2. 否则从数据库读取 AccountSyncService 自动同步的数据（每10秒）
+          3. 如果数据库不可用，回退到直接调用交易所
 
         Args:
-            force_sync: 是否强制从交易所同步（订单执行后应设为True）
+            force_sync: 是否强制立即同步（订单执行后应设为True）
         """
         if self.paper_trading:
             if not self._portfolio_cache:
@@ -98,84 +101,83 @@ class PortfolioManager:
             logger.debug("纸面模式：使用缓存组合 (总值: %s USDT)", self._portfolio_cache.total_value)
             return self._portfolio_cache
 
-        # 检查是否需要同步
-        import time
-        now = time.time()
-        time_since_last_sync = now - self._last_sync_time
-        need_sync = force_sync or time_since_last_sync >= self.sync_interval_seconds
+        # 真实交易模式：优先使用 AccountSyncService
+        logger.debug(f"检查服务可用性: account_sync_service={self.account_sync_service is not None}, db_manager={self.db_manager is not None}")
+        if self.account_sync_service and self.db_manager:
+            try:
+                if force_sync:
+                    # 强制同步：触发 AccountSyncService 立即同步
+                    logger.info("通过 AccountSyncService 强制同步账户...")
+                    snapshot = await self.account_sync_service.force_sync()
+                    portfolio = self._convert_snapshot_to_portfolio(snapshot)
+                    logger.info(
+                        "✓ 强制同步完成 | 余额: %s USDT | 持仓数: %d",
+                        portfolio.cash,
+                        len(portfolio.positions),
+                    )
+                    return portfolio
+                else:
+                    # 从数据库读取最新数据（由 AccountSyncService 每10秒自动同步）
+                    portfolio = await self._fetch_portfolio_from_database()
+                    if portfolio:
+                        logger.debug(
+                            "从数据库读取账户数据 (由 AccountSyncService 同步) | 余额: %.2f USDT | 持仓: %d",
+                            portfolio.wallet_balance,
+                            len(portfolio.positions),
+                        )
+                        return portfolio
+                    else:
+                        logger.info("数据库暂无账户数据（首次启动），通过 AccountSyncService 强制同步...")
+                        # 首次运行时，使用 AccountSyncService 强制同步一次
+                        import asyncio
+                        snapshot = await self.account_sync_service.force_sync()
+                        portfolio = self._convert_snapshot_to_portfolio(snapshot)
+                        logger.info(
+                            "✓ 首次同步完成 | 余额: %s USDT | 持仓数: %d",
+                            portfolio.cash,
+                            len(portfolio.positions),
+                        )
+                        return portfolio
 
-        if not need_sync and self._portfolio_cache:
-            logger.debug(
-                "使用缓存组合 (上次同步: %.0f秒前, 间隔: %d秒)",
-                time_since_last_sync,
-                self.sync_interval_seconds,
-            )
-            return self._portfolio_cache
+            except Exception as e:
+                logger.warning(f"使用 AccountSyncService 失败: {e}，回退到直接同步交易所", exc_info=True)
+                return await self._fetch_portfolio_from_exchange_fallback()
 
-        # 使用锁确保并发请求时只执行一次同步
-        async with self._sync_lock:
-            # 双重检查：可能在等待锁的过程中，另一个协程已经完成了同步
-            now = time.time()
-            time_since_last_sync = now - self._last_sync_time
-
-            # 去重逻辑：即使是force_sync，如果在去重窗口内已同步过，也使用缓存
-            # 这样可以避免并发执行多个信号时的重复API调用
-            if (
-                self._portfolio_cache
-                and time_since_last_sync < self._sync_debounce_seconds
-            ):
-                logger.debug(
-                    "去重窗口内已同步(%.1f秒前)，使用缓存 (去重窗口: %.1f秒)",
-                    time_since_last_sync,
-                    self._sync_debounce_seconds,
-                )
-                return self._portfolio_cache
-
-            # 正常的同步检查
-            need_sync = force_sync or time_since_last_sync >= self.sync_interval_seconds
-            if not need_sync and self._portfolio_cache:
-                logger.debug(
-                    "其他协程已完成同步，使用缓存组合 (上次同步: %.0f秒前)",
-                    time_since_last_sync,
-                )
-                return self._portfolio_cache
-
-            # 执行同步
-            sync_reason = "强制同步" if force_sync else f"定期同步 (已过 {time_since_last_sync:.0f}秒)"
-            logger.info("从交易所同步持仓和余额... (%s)", sync_reason)
-            portfolio = await self._fetch_portfolio_from_exchange()
-            self._portfolio_cache = portfolio
-            self._last_sync_time = now
-            logger.info(
-                "✓ 同步完成 | 余额: %s USDT | 持仓数: %d | 总值: %s USDT",
-                portfolio.cash,
-                len(portfolio.positions),
-                portfolio.total_value,
-            )
-            return portfolio
+        # 回退：如果没有 AccountSyncService，使用原来的逻辑
+        logger.warning("AccountSyncService 未配置，使用回退逻辑")
+        return await self._fetch_portfolio_from_exchange_fallback()
 
     async def update_portfolio(self) -> Portfolio:
         """
-        强制同步最新组合（通常在订单执行后调用）。
-        等同于 get_current_portfolio(force_sync=True)
+        更新投资组合（通常在订单执行后调用）。
+
+        策略：
+        - 订单执行后必须立即同步交易所数据，以获取最新持仓
+        - 虽然会触发 API 调用，但这是必要的（订单执行本身就很少发生）
+        - 确保 _save_snapshots 能获取到正确的持仓数据
         """
         if self.paper_trading:
             self._portfolio_cache = self._build_portfolio_from_positions()
             logger.debug("纸面模式：更新组合缓存")
             return self._portfolio_cache
 
-        # 强制从交易所同步
+        # 订单执行后强制同步一次，确保获取最新持仓
         return await self.get_current_portfolio(force_sync=True)
 
-    async def get_position(self, symbol: str) -> Position | None:
+    async def get_position(self, symbol: str, side: OrderSide | None = None) -> Position | None:
         """
         获取指定交易对持仓。
         """
         if self.paper_trading:
+            if side:
+                pos = self._positions.get(symbol)
+                if pos and pos.side == side:
+                    return pos
+                return None
             return self._positions.get(symbol)
 
         portfolio = await self.get_current_portfolio()
-        return portfolio.get_position(symbol)
+        return portfolio.get_position(symbol, side)
 
     async def get_all_positions(self) -> List[Position]:
         """
@@ -304,12 +306,130 @@ class PortfolioManager:
     # 内部实现
     # ------------------------------------------------------------------ #
 
-    async def _fetch_portfolio_from_exchange(self) -> Portfolio:
+    async def _fetch_portfolio_from_database(self) -> Optional[Portfolio]:
+        """
+        从数据库读取最新的账户快照（由 AccountSyncService 同步）
+
+        Returns:
+            Portfolio 对象，如果数据库无数据则返回 None
+        """
+        if not self.db_manager:
+            return None
+
+        try:
+            from src.services.database import TradingDAO
+
+            async with self.db_manager.get_session() as session:
+                dao = TradingDAO(session)
+
+                # 获取最新的投资组合快照
+                snapshots = await dao.get_portfolio_snapshots(
+                    limit=1,
+                    exchange_name=self.exchange_id,
+                )
+                if not snapshots:
+                    return None
+
+                snapshot_db = snapshots[0]
+
+                # 获取当前持仓
+                db_positions = await dao.get_open_positions(
+                    exchange_name=self.exchange_id,
+                )
+
+                # 转换为 Position 对象
+                positions = []
+                from datetime import timezone
+
+                for pos in db_positions:
+                    opened_at_ms = None
+                    if pos.opened_at:
+                        try:
+                            opened_dt = pos.opened_at
+                            if opened_dt.tzinfo is None:
+                                opened_dt = opened_dt.replace(tzinfo=timezone.utc)
+                            opened_at_ms = int(opened_dt.timestamp() * 1000)
+                        except Exception:  # pylint: disable=broad-except
+                            opened_at_ms = None
+
+                    positions.append(Position(
+                        symbol=pos.symbol,
+                        side=OrderSide.BUY if pos.side == 'buy' else OrderSide.SELL,
+                        amount=Decimal(str(pos.amount)),
+                        entry_price=Decimal(str(pos.entry_price)),
+                        current_price=Decimal(str(pos.current_price)),
+                        unrealized_pnl=Decimal(str(pos.unrealized_pnl or 0)),
+                        unrealized_pnl_percentage=Decimal(str(pos.unrealized_pnl_percentage or 0)),
+                        value=Decimal(str(pos.value)),
+                        leverage=pos.leverage,
+                        liquidation_price=Decimal(str(pos.liquidation_price)) if pos.liquidation_price else None,
+                        stop_loss=Decimal(str(pos.stop_loss)) if pos.stop_loss else None,
+                        take_profit=Decimal(str(pos.take_profit)) if pos.take_profit else None,
+                        opened_at=opened_at_ms,
+                    ))
+
+                # 计算汇总数据
+                total_unrealized_pnl = sum(p.unrealized_pnl for p in positions)
+                wallet_balance = Decimal(str(snapshot_db.wallet_balance or 0))
+                available_balance = Decimal(str(snapshot_db.available_balance or 0))
+
+                # 创建 Portfolio 对象
+                now = datetime.now(timezone.utc)
+                portfolio = Portfolio(
+                    timestamp=int(snapshot_db.datetime.timestamp() * 1000),
+                    dt=now,
+                    wallet_balance=wallet_balance,
+                    available_balance=available_balance,
+                    margin_balance=Decimal(str(snapshot_db.margin_balance or 0)),
+                    positions=positions,
+                    unrealized_pnl=total_unrealized_pnl,
+                    daily_pnl=Decimal("0"),
+                    total_return=Decimal("0"),
+                )
+
+                return portfolio
+
+        except Exception as e:
+            logger.error(f"从数据库读取账户数据失败: {e}", exc_info=True)
+            return None
+
+    def _convert_snapshot_to_portfolio(self, snapshot) -> Portfolio:
+        """
+        将 AccountSnapshot 转换为 Portfolio 对象
+
+        Args:
+            snapshot: AccountSnapshot 对象
+
+        Returns:
+            Portfolio 对象
+        """
+        # 计算总未实现盈亏
+        unrealized_pnl = sum(p.unrealized_pnl for p in snapshot.positions)
+
+        # 钱包余额 = 总余额 + 未实现盈亏（对于合约账户）
+        wallet_balance = snapshot.total_balance + unrealized_pnl
+
+        now = datetime.now(timezone.utc)
+        return Portfolio(
+            timestamp=int(snapshot.timestamp.timestamp() * 1000),
+            dt=now,
+            wallet_balance=wallet_balance,
+            available_balance=snapshot.available_balance,
+            margin_balance=snapshot.used_margin,
+            positions=snapshot.positions,
+            unrealized_pnl=unrealized_pnl,
+            daily_pnl=Decimal("0"),
+            total_return=Decimal("0"),
+        )
+
+    async def _fetch_portfolio_from_exchange_fallback(self) -> Portfolio:
+        """
+        回退方法：直接从交易所获取组合（当 AccountSyncService 不可用时）
+        """
         # 使用统一的 ExchangeService 代替直接调用 exchange
         exchange_service = get_exchange_service()
         try:
             # 1. 获取账户余额
-            logger.debug("正在调用 fetch_balance()...")
             balance = await exchange_service.fetch_balance()
 
             # 获取币安的余额字段
@@ -317,18 +437,12 @@ class PortfolioManager:
             margin_balance = Decimal(str(balance.get("used", {}).get(self.base_currency, 0)))     # 已用保证金
             total_balance = Decimal(str(balance.get("total", {}).get(self.base_currency, 0)))     # 总余额
 
-            logger.info("  ├─ 可用保证金 (Available): %s %s", available_balance, self.base_currency)
-            logger.info("  ├─ 已用保证金 (Used): %s %s", margin_balance, self.base_currency)
-            logger.info("  ├─ 总余额 (Total): %s %s", total_balance, self.base_currency)
-
             # 2. 获取持仓列表
             positions_raw = []
             try:
-                logger.debug("正在调用 fetch_positions()...")
                 positions_raw = await exchange_service.fetch_positions()
-                logger.info("  ├─ 原始持仓数据: %d 条", len(positions_raw))
             except Exception as exc:  # pylint: disable=broad-except
-                logger.warning("  └─ 获取持仓失败: %s", exc)
+                logger.warning("获取持仓失败: %s", exc)
 
             # 3. 获取保护单(止盈/止损)并构建映射
             protection_orders: List[Dict[str, Any]] = []
@@ -338,26 +452,11 @@ class PortfolioManager:
 
             if symbols_for_orders:
                 protection_orders = await self._fetch_protection_orders(exchange_service, symbols_for_orders)
-            else:
-                logger.debug("  └─ 当前无持仓，跳过保护单查询")
 
             protection_map = self._build_protection_map(protection_orders)
 
             # 4. 解析持仓
             positions = self._parse_positions(positions_raw, protection_map)
-            if positions:
-                logger.info("  ├─ 解析后持仓:")
-                for pos in positions:
-                    logger.info(
-                        "  │   %s: %.4f @ %.4f (价值: %.2f USDT, PnL: %.2f)",
-                        pos.symbol,
-                        pos.amount,
-                        pos.current_price,
-                        pos.value,
-                        pos.unrealized_pnl,
-                    )
-            else:
-                logger.info("  └─ 当前无持仓")
 
             # 计算未实现盈亏
             unrealized_pnl = sum(pos.unrealized_pnl for pos in positions)
@@ -366,8 +465,14 @@ class PortfolioManager:
             # 如果是现货账户，wallet_balance 就等于 total_balance
             wallet_balance = total_balance + unrealized_pnl
 
-            logger.info("  ├─ 未实现盈亏 (Unrealized PNL): %s %s", unrealized_pnl, self.base_currency)
-            logger.info("  └─ 钱包余额 (Wallet Balance): %s %s", wallet_balance, self.base_currency)
+            logger.info(
+                "账户同步完成 | 余额: %.2f %s | 持仓: %d | 未实现盈亏: %.2f %s",
+                wallet_balance,
+                self.base_currency,
+                len(positions),
+                unrealized_pnl,
+                self.base_currency
+            )
 
             now = datetime.now(timezone.utc)
             portfolio = Portfolio(
@@ -399,12 +504,10 @@ class PortfolioManager:
 
         for symbol in symbols:
             try:
-                logger.debug("  ├─ 调用 fetch_open_orders(%s)...", symbol)
                 symbol_orders = await exchange_service.fetch_open_orders(symbol)
-                logger.info("  │   %s 未完成订单: %d 条", symbol, len(symbol_orders))
                 orders.extend(symbol_orders)
             except Exception as exc:  # pylint: disable=broad-except
-                logger.warning("  └─ 获取 %s 未完成订单失败: %s", symbol, exc)
+                logger.warning("获取 %s 未完成订单失败: %s", symbol, exc)
 
         return orders
 
@@ -474,17 +577,12 @@ class PortfolioManager:
         protection_map = protection_map or {}
         for idx, item in enumerate(raw_positions):
             try:
-                # 打印原始持仓数据用于调试
-                logger.debug("持仓原始数据 [%d]: %s", idx, item)
-
                 symbol = item.get("symbol")
                 if not symbol:
-                    logger.debug("跳过无效持仓数据 [%d]: 缺少 symbol", idx)
                     continue
 
                 amount = Decimal(str(item.get("contracts") or item.get("amount") or 0))
                 if amount == 0:
-                    logger.debug("跳过零持仓: %s", symbol)
                     continue
 
                 # Binance USDM 双向持仓模式下，需要检查 side 字段
@@ -497,7 +595,6 @@ class PortfolioManager:
                 else:
                     # 兼容旧逻辑（单向持仓模式）
                     side = OrderSide.BUY if amount >= 0 else OrderSide.SELL
-                    logger.debug("未找到 side 字段，使用 amount 符号判断方向: %s", side.value)
 
                 entry_price = Decimal(str(item.get("entryPrice") or item.get("avgPrice") or 0))
                 current_price = Decimal(str(item.get("markPrice") or item.get("last") or entry_price))
@@ -511,7 +608,6 @@ class PortfolioManager:
                 if liquidation_price_raw and liquidation_price_raw not in (0, "0"):
                     try:
                         liquidation_price = Decimal(str(liquidation_price_raw))
-                        logger.debug("%s 强平价格: %s", symbol, liquidation_price)
                     except (ValueError, TypeError):
                         logger.warning("%s 强平价格解析失败: %s", symbol, liquidation_price_raw)
                         liquidation_price = None
@@ -524,7 +620,6 @@ class PortfolioManager:
                 if leverage_raw:
                     try:
                         leverage = int(leverage_raw)
-                        logger.debug("%s 杠杆倍数(直接获取): %d", symbol, leverage)
                     except (ValueError, TypeError):
                         logger.warning("%s 杠杆倍数解析失败: %s", symbol, leverage_raw)
                 else:
@@ -536,13 +631,8 @@ class PortfolioManager:
                         if initial_margin > 0 and notional > 0:
                             calculated_leverage = round(notional / initial_margin)
                             leverage = int(calculated_leverage)
-                            logger.debug("%s 杠杆倍数(计算): %dx (名义价值=%.2f, 保证金=%.2f)",
-                                       symbol, leverage, notional, initial_margin)
-                        else:
-                            logger.debug("%s 无法计算杠杆: notional=%s, initialMargin=%s",
-                                       symbol, notional, initial_margin)
-                    except (ValueError, TypeError, KeyError) as e:
-                        logger.debug("%s 杠杆计算失败: %s", symbol, e)
+                    except (ValueError, TypeError, KeyError):
+                        pass
 
                 # 获取开仓时间 (Binance: updateTime)
                 # CCXT可能在顶层或info字段中
@@ -552,9 +642,8 @@ class PortfolioManager:
                     try:
                         # Binance返回的是毫秒时间戳
                         opened_at = int(opened_at_raw)
-                        logger.debug("%s 开仓时间: %s", symbol, opened_at)
                     except (ValueError, TypeError):
-                        logger.debug("%s 开仓时间解析失败: %s", symbol, opened_at_raw)
+                        pass
 
                 protection = protection_map.get((symbol, side), {})
 
@@ -574,9 +663,8 @@ class PortfolioManager:
                     opened_at=opened_at,
                 )
                 positions.append(position)
-                logger.debug("解析持仓 [%d]: %s %s %.4f", idx, symbol, side.value, abs(amount))
             except Exception as exc:  # pylint: disable=broad-except
-                logger.warning("解析持仓失败 [%d]: %s | 错误: %s", idx, item, exc)
+                logger.warning("解析持仓失败: %s", exc)
         return positions
 
     def _build_portfolio_from_positions(self) -> Portfolio:

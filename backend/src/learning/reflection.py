@@ -13,8 +13,8 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional, Protocol, Sequence
 
 from src.core.logger import get_logger
-from src.decision.llm_client import LLMResponse, Message
-from src.decision.llm_client import ToolCall  # re-export for type hints
+from src.services.llm import LLMResponse, Message
+from src.services.llm import ToolCall  # re-export for type hints
 from src.models.memory import TradingExperience
 from src.models.performance import PerformanceMetrics
 

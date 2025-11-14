@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Protocol
 
 from src.core.exceptions import DecisionError, ToolExecutionError
 from src.core.logger import get_logger
-from src.decision.llm_client import LLMResponse, Message, ToolCall
+from src.services.llm import LLMResponse, Message, ToolCall
 from src.decision.prompts import PromptTemplates
 from src.decision.tools import SupportsMemoryRetrieval, ToolRegistry
 from src.models.decision import SignalType, StrategyConfig, TradingSignal
@@ -406,20 +406,36 @@ class LLMTrader:
         liquidation_str = str(position.liquidation_price) if position.liquidation_price else "未设置"
 
         # 计算持仓时长
+        from datetime import datetime, timezone
         import time
         holding_duration_str = "未知"
         if position.opened_at:
-            current_time_ms = int(time.time() * 1000)
-            duration_ms = current_time_ms - position.opened_at
-            duration_hours = duration_ms / (1000 * 60 * 60)
-            if duration_hours < 1:
-                duration_minutes = duration_ms / (1000 * 60)
-                holding_duration_str = f"{duration_minutes:.0f}分钟"
-            elif duration_hours < 24:
-                holding_duration_str = f"{duration_hours:.1f}小时"
-            else:
-                duration_days = duration_hours / 24
-                holding_duration_str = f"{duration_days:.1f}天"
+            try:
+                # opened_at 可能是 datetime 对象或毫秒时间戳
+                if isinstance(position.opened_at, datetime):
+                    opened_at_dt = position.opened_at
+                    if opened_at_dt.tzinfo is None:
+                        opened_at_dt = opened_at_dt.replace(tzinfo=timezone.utc)
+                    duration = datetime.now(timezone.utc) - opened_at_dt
+                    duration_seconds = duration.total_seconds()
+                else:
+                    # 如果是毫秒时间戳（int）
+                    current_time_ms = int(time.time() * 1000)
+                    duration_ms = current_time_ms - int(position.opened_at)
+                    duration_seconds = max(duration_ms / 1000.0, 0)
+
+                duration_hours = duration_seconds / 3600
+                if duration_hours < 1:
+                    duration_minutes = duration_seconds / 60
+                    holding_duration_str = f"{duration_minutes:.0f}分钟"
+                elif duration_hours < 24:
+                    holding_duration_str = f"{duration_hours:.1f}小时"
+                else:
+                    duration_days = duration_hours / 24
+                    holding_duration_str = f"{duration_days:.1f}天"
+            except Exception as e:
+                # 如果计算失败，保持"未知"
+                pass
 
         return (
             f"已持有 {symbol}:\n"
@@ -528,10 +544,12 @@ class LLMTrader:
 
         return (
             f"账户总览:\n"
-            f"  总资产: {portfolio.total_value} USDT\n"
-            f"  可用现金: {portfolio.cash} USDT\n"
+            f"  钱包余额: {portfolio.wallet_balance} USDT\n"
+            f"  可用余额: {portfolio.available_balance} USDT\n"
+            f"  保证金余额: {portfolio.margin_balance} USDT\n"
             f"  持仓总值: {total_positions_value} USDT\n"
             f"  持仓数量: {len(portfolio.positions)} 个\n"
+            f"  未实现盈亏: {portfolio.unrealized_pnl} USDT\n"
             f"  风险暴露: {risk_exposure:.2f}%\n"
             f"  今日盈亏: {portfolio.daily_pnl} USDT\n"
             f"  累计收益率: {portfolio.total_return:.2f}%"
@@ -792,12 +810,20 @@ class LLMTrader:
                     )
 
                     signals[symbol] = signal
-                    logger.info(
-                        "解析信号: %s → %s (置信度: %.2f)",
-                        symbol,
-                        signal_type.value,
-                        signal.confidence,
-                    )
+                    # Hold 信号特殊处理：0 置信度表示"观望，无明确机会"
+                    if signal_type == SignalType.HOLD and signal.confidence == 0.0:
+                        logger.info(
+                            "解析信号: %s → %s (保持观望，无明确机会)",
+                            symbol,
+                            signal_type.value,
+                        )
+                    else:
+                        logger.info(
+                            "解析信号: %s → %s (置信度: %.2f)",
+                            symbol,
+                            signal_type.value,
+                            signal.confidence,
+                        )
 
                 except Exception as exc:
                     logger.error("解析单个信号失败: %s", exc)

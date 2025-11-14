@@ -39,7 +39,7 @@ export const DecisionContextSchema = z.object({
   existing_position: z.object({
     side: z.string(),
     amount: z.string(),
-    leverage: z.number().optional(),
+    leverage: z.number().nullable().optional(),
     entry_price: z.string(),
     current_price: z.string(),
     unrealized_pnl: z.string(),

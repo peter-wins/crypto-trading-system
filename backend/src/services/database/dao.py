@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from decimal import Decimal
 from typing import List, Optional, Dict, Any
 from sqlalchemy import select, and_, desc
@@ -51,6 +51,31 @@ class TradingDAO:
         if dt.tzinfo is not None:
             return dt.replace(tzinfo=None)
         return dt
+
+    def _convert_opened_at(self, opened_at: Optional[Any]) -> datetime:
+        """将 Position.opened_at 转换为数据库可用的 datetime（UTC时间，无时区信息）"""
+        if opened_at is None:
+            return datetime.now(timezone.utc).replace(tzinfo=None)
+
+        if isinstance(opened_at, datetime):
+            return self._make_naive(opened_at)
+
+        try:
+            value = float(opened_at)
+        except (TypeError, ValueError):
+            return datetime.now(timezone.utc).replace(tzinfo=None)
+
+        # Binance/CCXT 返回毫秒时间戳，需要转换为秒
+        if value > 1e12:
+            value /= 1000.0
+        elif value > 1e10:  # 微秒
+            value /= 1e6
+
+        try:
+            dt_obj = datetime.fromtimestamp(value, tz=timezone.utc)
+            return self._make_naive(dt_obj)
+        except (OSError, OverflowError, ValueError):
+            return datetime.now(timezone.utc).replace(tzinfo=None)
 
     async def _get_or_create_exchange_id(self, exchange_name: Optional[str] = None) -> int:
         """
@@ -191,23 +216,28 @@ class TradingDAO:
         """
         保存或更新持仓（UPSERT）
 
-        注意：positions 表存储当前活跃持仓，每个 (exchange_id, symbol, is_open=True) 只能有一条记录。
-        如果已存在相同symbol的开仓记录，则更新；否则插入新记录。
+        注意：positions 表存储当前活跃持仓，每个 (exchange_id, symbol, side, is_open=True) 只能有一条记录。
+        如果已存在相同symbol和side的开仓记录，则更新；否则插入新记录。
+        支持 HEDGE 模式下同一 symbol 的多空双向持仓。
         """
         try:
             exchange_id = await self._get_or_create_exchange_id(exchange_name)
 
-            # 查找是否已存在该symbol的开仓记录
+            # 查找是否已存在该symbol和side的开仓记录（支持双向持仓）
             result = await self.session.execute(
                 select(PositionModel).where(
                     and_(
                         PositionModel.exchange_id == exchange_id,
                         PositionModel.symbol == position.symbol,
+                        PositionModel.side == position.side.value,  # 增加 side 条件以支持双向持仓
                         PositionModel.is_open == True
                     )
                 )
             )
             existing_position = result.scalar_one_or_none()
+
+            entry_order_id = getattr(position, "entry_order_id", None)
+            opened_at = self._convert_opened_at(getattr(position, "opened_at", None))
 
             if existing_position:
                 # 更新现有持仓
@@ -222,7 +252,13 @@ class TradingDAO:
                 existing_position.take_profit = position.take_profit
                 existing_position.leverage = position.leverage
                 existing_position.liquidation_price = position.liquidation_price
-                existing_position.updated_at = datetime.now()
+                if getattr(position, "entry_fee", None) is not None:
+                    existing_position.entry_fee = position.entry_fee
+                existing_position.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                if entry_order_id:
+                    existing_position.entry_order_id = entry_order_id
+                if position.opened_at:
+                    existing_position.opened_at = opened_at
             else:
                 # 插入新持仓
                 position_model = PositionModel(
@@ -239,8 +275,10 @@ class TradingDAO:
                     take_profit=position.take_profit,
                     leverage=position.leverage,
                     liquidation_price=position.liquidation_price,
+                    entry_fee=position.entry_fee or Decimal('0'),
                     is_open=True,
-                    opened_at=datetime.now()
+                    entry_order_id=entry_order_id,
+                    opened_at=opened_at
                 )
                 self.session.add(position_model)
 
@@ -251,81 +289,142 @@ class TradingDAO:
             self.logger.error(f"Failed to save position {position.symbol}: {e}")
             return False
 
-    async def close_positions_not_in_list(
+    async def get_position_by_symbol_side(
         self,
-        current_symbols: list[str],
-        exchange_name: Optional[str] = None
-    ) -> int:
-        """
-        关闭所有不在当前持仓列表中的持仓记录
-
-        Args:
-            current_symbols: 当前活跃的持仓symbol列表
-            exchange_name: 交易所名称
-
-        Returns:
-            关闭的持仓数量
-        """
+        symbol: str,
+        side: str,
+        exchange_name: Optional[str] = None,
+    ) -> Optional[PositionModel]:
+        """获取指定 symbol/side 的当前持仓"""
         try:
             exchange_id = await self._get_or_create_exchange_id(exchange_name)
-
-            # 查找所有开仓的持仓，但不在current_symbols列表中
-            if current_symbols:
-                result = await self.session.execute(
-                    select(PositionModel).where(
-                        and_(
-                            PositionModel.exchange_id == exchange_id,
-                            PositionModel.is_open == True,
-                            PositionModel.symbol.notin_(current_symbols)
-                        )
+            result = await self.session.execute(
+                select(PositionModel).where(
+                    and_(
+                        PositionModel.exchange_id == exchange_id,
+                        PositionModel.symbol == symbol,
+                        PositionModel.side == side,
+                        PositionModel.is_open == True,
                     )
                 )
-            else:
-                # 如果没有当前持仓，关闭所有开仓记录
-                result = await self.session.execute(
-                    select(PositionModel).where(
-                        and_(
-                            PositionModel.exchange_id == exchange_id,
-                            PositionModel.is_open == True
-                        )
-                    )
-                )
-
-            positions_to_close = result.scalars().all()
-
-            # 关闭这些持仓：先保存到 closed_positions，再删除
-            closed_count = 0
-            for position in positions_to_close:
-                self.logger.debug(f"关闭持仓记录: {position.symbol}")
-
-                # 保存到 closed_positions 表
-                # 注意：这里没有具体的平仓订单信息，使用 current_price 作为 exit_price
-                await self.save_closed_position(
-                    position=position,
-                    exit_order_id=None,  # 没有订单信息
-                    exit_price=position.current_price,
-                    exit_time=datetime.now()
-                )
-
-                # 从 positions 表删除
-                await self.session.delete(position)
-                closed_count += 1
-
-            await self.session.flush()
-            return closed_count
-
+            )
+            return result.scalar_one_or_none()
         except Exception as e:
-            self.logger.error(f"Failed to close positions: {e}")
-            return 0
+            self.logger.error(f"Failed to fetch position {symbol} {side}: {e}")
+            return None
 
     # ==================== Portfolio Methods ====================
+
+    async def update_latest_portfolio_snapshot(
+        self,
+        wallet_balance: float,
+        available_balance: float,
+        margin_balance: float,
+        unrealized_pnl: float,
+        positions: List[Any],
+        exchange_name: Optional[str] = None
+    ) -> bool:
+        """
+        更新最新的投资组合快照（用于 AccountSyncService 每 10 秒同步）
+
+        如果存在记录则更新最新一条，否则创建新记录
+        """
+        try:
+            from datetime import datetime
+            from sqlalchemy import select, desc
+
+            exchange_id = await self._get_or_create_exchange_id(exchange_name)
+
+            # 查询最新的快照记录
+            stmt = (
+                select(PortfolioSnapshotModel)
+                .where(PortfolioSnapshotModel.exchange_id == exchange_id)
+                .order_by(desc(PortfolioSnapshotModel.datetime))
+                .limit(1)
+            )
+            result = await self.session.execute(stmt)
+            latest_snapshot = result.scalar_one_or_none()
+
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            snapshot_date = now.date()
+
+            # 准备持仓数据
+            positions_data = [{
+                "symbol": p.symbol,
+                "side": p.side,
+                "amount": float(p.amount),
+                "entry_price": float(p.entry_price),
+                "current_price": float(p.current_price),
+                "value": float(p.value),
+                "pnl": float(p.unrealized_pnl),
+                "leverage": p.leverage if p.leverage else None,
+                "liquidation_price": float(p.liquidation_price) if p.liquidation_price else None,
+                "stop_loss": float(p.stop_loss) if p.stop_loss else None,
+                "take_profit": float(p.take_profit) if p.take_profit else None
+            } for p in positions]
+
+            positions_value = sum(p.value for p in positions)
+            total_value = wallet_balance  # 总资产 = 钱包余额
+
+            if latest_snapshot:
+                # 更新现有记录
+                latest_snapshot.wallet_balance = wallet_balance
+                latest_snapshot.available_balance = available_balance
+                latest_snapshot.margin_balance = margin_balance
+                latest_snapshot.unrealized_pnl = unrealized_pnl
+                latest_snapshot.total_value = total_value
+                latest_snapshot.cash = available_balance
+                latest_snapshot.positions_value = positions_value
+                latest_snapshot.positions = positions_data
+                latest_snapshot.snapshot_date = snapshot_date
+                latest_snapshot.timestamp = int(now.timestamp())
+                latest_snapshot.datetime = now
+                latest_snapshot.updated_at = now
+
+                self.logger.debug(
+                    f"已更新最新快照: 总资产={total_value:.2f}, "
+                    f"持仓数={len(positions)}"
+                )
+            else:
+                # 首次创建记录
+                snapshot_model = PortfolioSnapshotModel(
+                    exchange_id=exchange_id,
+                    wallet_balance=wallet_balance,
+                    available_balance=available_balance,
+                    margin_balance=margin_balance,
+                    unrealized_pnl=unrealized_pnl,
+                    total_value=total_value,
+                    cash=available_balance,
+                    positions_value=positions_value,
+                    positions=positions_data,
+                    snapshot_date=snapshot_date,
+                    timestamp=int(now.timestamp()),
+                    datetime=now
+                )
+                self.session.add(snapshot_model)
+
+                self.logger.debug(
+                    f"已创建首个快照: 总资产={total_value:.2f}, "
+                    f"持仓数={len(positions)}"
+                )
+
+            await self.session.flush()
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to update latest portfolio snapshot: {e}")
+            return False
 
     async def save_portfolio_snapshot(
         self,
         portfolio: Portfolio,
-        exchange_name: Optional[str] = None
+        exchange_name: Optional[str] = None,
+        *,
+        archive_reason: Optional[str] = None,
+        is_archive: bool = False,
+        position_count: Optional[int] = None,
     ) -> bool:
-        """保存投资组合快照（每次执行都新增一条记录，保留完整历史）"""
+        """保存投资组合快照"""
         try:
             exchange_id = await self._get_or_create_exchange_id(exchange_name)
             snapshot_date = portfolio.dt.date()
@@ -338,22 +437,19 @@ class TradingDAO:
                 "current_price": float(p.current_price),
                 "value": float(p.value),
                 "pnl": float(p.unrealized_pnl),
-                "pnl_pct": float(p.unrealized_pnl_percentage) if p.unrealized_pnl_percentage else 0,
+                "pnl_pct": float(p.unrealized_pnl_percentage or 0),
                 "leverage": p.leverage if p.leverage else None,
                 "liquidation_price": float(p.liquidation_price) if p.liquidation_price else None,
                 "stop_loss": float(p.stop_loss) if p.stop_loss else None,
                 "take_profit": float(p.take_profit) if p.take_profit else None
             } for p in portfolio.positions]
 
-            # 每次都创建新快照记录
             snapshot_model = PortfolioSnapshotModel(
                 exchange_id=exchange_id,
-                # 新字段（与币安对齐）
                 wallet_balance=portfolio.wallet_balance,
                 available_balance=portfolio.available_balance,
                 margin_balance=portfolio.margin_balance,
                 unrealized_pnl=portfolio.unrealized_pnl,
-                # 旧字段（保持兼容）
                 total_value=portfolio.total_value,
                 cash=portfolio.cash,
                 positions_value=sum(p.value for p in portfolio.positions),
@@ -363,15 +459,14 @@ class TradingDAO:
                 positions=positions_data,
                 snapshot_date=snapshot_date,
                 timestamp=portfolio.timestamp,
-                datetime=self._make_naive(portfolio.dt)
+                datetime=self._make_naive(portfolio.dt),
+                archive_reason=archive_reason,
+                is_archive=is_archive,
+                position_count=position_count if position_count is not None else len(portfolio.positions),
             )
             self.session.add(snapshot_model)
 
             await self.session.flush()
-            self.logger.debug(
-                f"已保存快照: 总资产={portfolio.total_value}, "
-                f"持仓数={len(portfolio.positions)}, 时间={portfolio.dt.isoformat()}"
-            )
             return True
 
         except Exception as e:
@@ -656,11 +751,16 @@ class TradingDAO:
 
     async def get_open_positions(
         self,
-        exchange_name: Optional[str] = None
+        exchange_name: Optional[str] = None,
+        *,
+        include_closed: bool = False,
     ) -> List[PositionModel]:
-        """获取开放持仓"""
+        """获取 positions 记录，默认仅返回 is_open=True 的持仓"""
         try:
-            query = select(PositionModel).where(PositionModel.closed_at.is_(None))
+            query = select(PositionModel)
+
+            if not include_closed:
+                query = query.where(PositionModel.is_open == True)  # pylint: disable=singleton-comparison
 
             if exchange_name:
                 exchange_id = await self._get_or_create_exchange_id(exchange_name)
@@ -677,7 +777,8 @@ class TradingDAO:
         self,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
-        limit: int = 100
+        limit: Optional[int] = None,
+        exchange_name: Optional[str] = None,
     ) -> List[PortfolioSnapshotModel]:
         """
         获取投资组合快照
@@ -685,13 +786,15 @@ class TradingDAO:
         Args:
             start_date: 开始日期
             end_date: 结束日期
-            limit: 返回数量限制
+            limit: 返回数量限制（默认None=不限制）
+                  当指定日期范围时，建议不设置limit以获取完整数据
+                  当不指定日期范围时，建议设置limit防止返回过多数据
 
         Returns:
             快照列表
         """
         try:
-            query = select(PortfolioSnapshotModel).order_by(desc(PortfolioSnapshotModel.snapshot_date))
+            query = select(PortfolioSnapshotModel).order_by(desc(PortfolioSnapshotModel.datetime))
 
             filters = []
             if start_date:
@@ -702,7 +805,21 @@ class TradingDAO:
             if filters:
                 query = query.where(and_(*filters))
 
-            query = query.limit(limit)
+            exchange_filter_name = exchange_name or self.default_exchange_name
+            if exchange_filter_name:
+                exchange_id = await self._get_or_create_exchange_id(exchange_filter_name)
+                query = query.where(PortfolioSnapshotModel.exchange_id == exchange_id)
+
+            # 仅返回指定交易所的数据
+            exchange_filter_name = exchange_name or self.default_exchange_name
+            if exchange_filter_name:
+                exchange_id = await self._get_or_create_exchange_id(exchange_filter_name)
+                query = query.where(PortfolioSnapshotModel.exchange_id == exchange_id)
+
+            # 只有明确指定limit时才应用限制
+            if limit is not None:
+                query = query.limit(limit)
+
             result = await self.session.execute(query)
             return list(result.scalars().all())
 
@@ -728,7 +845,9 @@ class TradingDAO:
         position: PositionModel,
         exit_order_id: str,
         exit_price: Decimal,
-        exit_time: datetime
+        exit_time: datetime,
+        fee: Decimal = Decimal('0'),
+        close_reason: str = 'unknown'
     ) -> bool:
         """
         保存已平仓记录到 closed_positions 表
@@ -738,8 +857,18 @@ class TradingDAO:
             exit_order_id: 平仓订单ID
             exit_price: 平仓价格
             exit_time: 平仓时间
+            fee: 平仓手续费（默认0）
+            close_reason: 平仓原因 (manual, stop_loss, take_profit, liquidation, system, unknown)
         """
         try:
+            # 如果 exit_order_id 不在 orders 表中，置为 None 以避免外键冲突
+            if exit_order_id:
+                result = await self.session.execute(
+                    select(OrderModel.id).where(OrderModel.id == exit_order_id)
+                )
+                if not result.scalar_one_or_none():
+                    exit_order_id = None
+
             # 计算盈亏
             entry_value = position.entry_price * position.amount
             exit_value = exit_price * position.amount
@@ -753,7 +882,20 @@ class TradingDAO:
 
             # 计算持仓时长
             if position.opened_at:
-                holding_duration = int((exit_time - position.opened_at).total_seconds())
+                try:
+                    # 确保两个datetime都是naive或都是aware
+                    opened_at = position.opened_at
+                    if opened_at.tzinfo is not None:
+                        # 如果 opened_at 有时区，移除时区信息
+                        opened_at = opened_at.replace(tzinfo=None)
+                    if exit_time.tzinfo is not None:
+                        # 如果 exit_time 有时区，移除时区信息
+                        exit_time = exit_time.replace(tzinfo=None)
+
+                    holding_duration = int((exit_time - opened_at).total_seconds())
+                except Exception as e:
+                    self.logger.warning(f"计算持仓时长失败: {e}")
+                    holding_duration = None
             else:
                 holding_duration = None
 
@@ -773,11 +915,12 @@ class TradingDAO:
                 exit_value=exit_value,
                 realized_pnl=realized_pnl,
                 realized_pnl_percentage=realized_pnl_percentage,
-                total_fee=Decimal("0"),  # TODO: 从订单获取手续费
+                total_fee=fee,  # 使用传入的手续费
                 fee_currency="USDT",
+                close_reason=close_reason,  # 使用传入的平仓原因
                 holding_duration_seconds=holding_duration,
                 leverage=position.leverage,
-                created_at=datetime.now()
+                created_at=datetime.now(timezone.utc).replace(tzinfo=None)
             )
 
             self.session.add(closed_position)
@@ -838,4 +981,46 @@ class TradingDAO:
 
         except Exception as e:
             self.logger.error(f"Failed to get closed positions: {e}")
+            return []
+
+    # ==================== Performance Metrics Methods ====================
+
+    async def get_performance_metrics(
+        self,
+        start_date: Optional[date] = None,
+        end_date: Optional[date] = None,
+        exchange_name: Optional[str] = None,
+        limit: int = 100
+    ) -> List['PerformanceMetricsModel']:
+        """
+        查询绩效指标记录
+
+        Args:
+            start_date: 开始日期
+            end_date: 结束日期  
+            exchange_name: 交易所名称
+            limit: 返回记录数量限制
+        """
+        try:
+            from src.services.database.models import PerformanceMetricsModel
+            
+            query = select(PerformanceMetricsModel).order_by(desc(PerformanceMetricsModel.start_date))
+
+            filters = []
+
+            if start_date:
+                filters.append(PerformanceMetricsModel.start_date >= datetime.combine(start_date, datetime.min.time()))
+
+            if end_date:
+                filters.append(PerformanceMetricsModel.end_date <= datetime.combine(end_date, datetime.max.time()))
+
+            if filters:
+                query = query.where(and_(*filters))
+
+            query = query.limit(limit)
+            result = await self.session.execute(query)
+            return list(result.scalars().all())
+
+        except Exception as e:
+            self.logger.error(f"Failed to get performance metrics: {e}")
             return []

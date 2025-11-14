@@ -73,26 +73,23 @@ export function EquityChart({ data, isLoading }: EquityChartProps) {
       }
     })
   } else {
-    // 多天数据：每天取收盘价
-    groupedByDay.forEach((points) => {
+    // 多天数据：第一天取开盘价（可能是初始资金），其他天取收盘价
+    const sortedDays = Array.from(groupedByDay.entries()).sort((a, b) => {
+      return new Date(a[0]).getTime() - new Date(b[0]).getTime()
+    })
+
+    sortedDays.forEach(([dayKey, points], index) => {
       const sortedPoints = points.sort((a, b) =>
         new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
       )
 
-      // 取每天的最后一个点
-      const closePoint = sortedPoints[sortedPoints.length - 1]
-      const closeDate = new Date(closePoint.timestamp)
+      // 第一天取第一个点（可能是初始资金），其他天取最后一个点（收盘价）
+      const point = index === 0 ? sortedPoints[0] : sortedPoints[sortedPoints.length - 1]
+      const pointDate = new Date(point.timestamp)
       chartData.push({
-        timestamp: format(closeDate, "MM/dd"),  // 只显示日期
-        value: closePoint.value,
+        timestamp: format(pointDate, "MM/dd"),
+        value: point.value,
       })
-    })
-
-    // 按时间排序
-    chartData.sort((a, b) => {
-      const aDate = new Date(a.timestamp)
-      const bDate = new Date(b.timestamp)
-      return aDate.getTime() - bDate.getTime()
     })
   }
 
@@ -108,12 +105,7 @@ export function EquityChart({ data, isLoading }: EquityChartProps) {
       <CardHeader>
         <CardTitle>净值曲线</CardTitle>
         <CardDescription>
-          期间收益: <span className={isPositive ? "text-profit font-semibold" : "text-loss font-semibold"}>
-            ${totalReturn.toFixed(2)} ({isPositive ? '+' : ''}{totalReturnPercentage}%)
-          </span>
-          <span className="text-muted-foreground ml-2 text-xs">
-            ({format(new Date(data[0].timestamp), "MM/dd")} - {format(new Date(data[data.length - 1].timestamp), "MM/dd")})
-          </span>
+          钱包余额变化趋势
         </CardDescription>
       </CardHeader>
       <CardContent>

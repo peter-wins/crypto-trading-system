@@ -11,7 +11,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from src.perception.kline_manager import KlineDataManager
+from src.services.kline.kline_service import KlineDataManager
 
 
 class KlineDataCleaner:
@@ -48,7 +48,7 @@ class KlineDataCleaner:
         self.running = True
         self._task = asyncio.create_task(self._cleanup_loop())
         self.logger.info(
-            f"🧹 启动K线数据清理任务 (间隔: {self.cleanup_interval}秒 = {self.cleanup_interval/3600:.1f}小时)"
+            f"✓ [K线清理] 任务已启动 (间隔: {self.cleanup_interval}秒 = {self.cleanup_interval/3600:.1f}小时)"
         )
 
     async def stop(self, timeout: float = 5.0) -> None:

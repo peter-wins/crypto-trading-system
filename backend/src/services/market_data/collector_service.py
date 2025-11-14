@@ -14,7 +14,7 @@ from statistics import pstdev
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 
-from src.perception.market_data import CCXTMarketDataCollector
+from src.services.market_data.ccxt_collector import CCXTMarketDataCollector
 from src.perception.indicators import PandasIndicatorCalculator
 from src.memory.short_term import RedisShortTermMemory
 from src.models.memory import MarketContext
@@ -80,7 +80,7 @@ class MarketDataCollector:
 
         self.running = True
         self._task = asyncio.create_task(self._collection_loop())
-        self.logger.info("🔄 启动后台数据采集任务（间隔: %s秒）", self.collection_interval)
+        self.logger.info("✓ [数据采集] 后台任务已启动（间隔: %s秒）", self.collection_interval)
 
         # 等待初始数据采集完成(至少一轮)
         await self._wait_for_initial_data()
@@ -111,7 +111,7 @@ class MarketDataCollector:
         Args:
             max_wait: 最大等待时间(秒)
         """
-        self.logger.info("⏳ 等待初始数据采集完成...")
+        self.logger.debug("⏳ 等待初始数据采集完成...")
         elapsed = 0
         check_interval = 0.5
 
@@ -327,7 +327,8 @@ class MarketDataCollector:
             return snapshot
 
         except Exception as exc:
-            self.logger.error("采集 %s 数据时发生错误: %s", symbol, exc, exc_info=True)
+            # 网络错误很常见，只记录简短信息，下次采集会自动重试
+            self.logger.warning("采集 %s 数据失败: %s (下次采集自动重试)", symbol, str(exc)[:100])
             return None
 
     def get_latest_snapshot(self, symbol: str) -> Optional[Dict[str, Any]]:

@@ -14,12 +14,12 @@ from decimal import Decimal
 from src.core.config import get_config, Config, RiskConfig
 from src.core.logger import get_logger
 from src.core.trading_coordinator import TradingCoordinator
-from src.perception.market_data import CCXTMarketDataCollector
+from src.services.market_data import CCXTMarketDataCollector
 from src.perception.indicators import PandasIndicatorCalculator
-from src.perception.data_collector import MarketDataCollector
+from src.services.market_data import MarketDataCollector
 from src.perception.symbol_mapper import SymbolMapper
-from src.perception.kline_manager import KlineDataManager
-from src.perception.kline_cleaner import KlineDataCleaner
+from src.services.kline import KlineManager
+from src.services.kline import KlineCleaner
 from src.perception.market_analyzer import MarketAnalyzer
 from src.memory.short_term import RedisShortTermMemory
 from src.memory.long_term import QdrantLongTermMemory
@@ -27,8 +27,11 @@ from src.execution.order import CCXTOrderExecutor
 from src.execution.risk import StandardRiskManager
 from src.execution.portfolio import PortfolioManager
 from src.execution.trading_executor import TradingExecutor
-from src.database.session import get_db_manager, DatabaseManager
+from src.services.database import get_db_manager, DatabaseManager
 from src.perception.http_utils import close_global_http_client
+from src.services.exchange.exchange_service import close_exchange_service
+from src.services.account_sync import AccountSyncService
+from src.services.exchange import ExchangeService
 
 
 class TradingSystemBuilder:
@@ -53,8 +56,8 @@ class TradingSystemBuilder:
         self.indicator_calculator: Optional[PandasIndicatorCalculator] = None
         self.market_analyzer: Optional[MarketAnalyzer] = None
         self.data_collector: Optional[MarketDataCollector] = None
-        self.kline_manager: Optional[KlineDataManager] = None
-        self.kline_cleaner: Optional[KlineDataCleaner] = None
+        self.kline_manager: Optional[KlineManager] = None
+        self.kline_cleaner: Optional[KlineCleaner] = None
 
         self.short_term_memory: Optional[RedisShortTermMemory] = None
         self.long_term_memory: Optional[any] = None
@@ -66,6 +69,13 @@ class TradingSystemBuilder:
 
         self.db_manager: Optional[DatabaseManager] = None
         self.symbol_mapper: Optional[SymbolMapper] = None
+
+        # 账户同步服务
+        self.account_sync_service: Optional[AccountSyncService] = None
+        self.exchange_service: Optional[ExchangeService] = None
+
+        # 绩效服务
+        self.performance_service: Optional[any] = None
 
         # 分层决策组件
         self.layered_coordinator: Optional[any] = None
@@ -82,9 +92,7 @@ class TradingSystemBuilder:
         await self._load_config()
 
         # 打印构建开始信息
-        self.logger.info("=" * 60)
-        self.logger.info("开始构建交易系统")
-        self.logger.info("=" * 60)
+        self.logger.info("[系统] 开始构建交易系统组件...")
 
         # 2. 初始化数据源和交易对
         await self._setup_data_source()
@@ -95,11 +103,11 @@ class TradingSystemBuilder:
         # 4. 初始化内存
         await self._setup_memory()
 
-        # 5. 初始化执行组件
-        await self._setup_execution()
-
-        # 6. 初始化数据库
+        # 5. 初始化数据库 (必须在执行组件之前初始化)
         await self._setup_database()
+
+        # 6. 初始化执行组件
+        await self._setup_execution()
 
         # 7. 初始化数据采集服务
         await self._setup_data_collector()
@@ -107,15 +115,19 @@ class TradingSystemBuilder:
         # 8. 初始化交易执行服务
         await self._setup_trading_executor()
 
-        # 9. 初始化分层决策 (如果启用)
+        # 9. 初始化账户同步服务
+        await self._setup_account_sync()
+
+        # 10. 初始化绩效服务
+        await self._setup_performance_service()
+
+        # 11. 初始化分层决策 (如果启用)
         await self._setup_layered_decision()
 
-        # 10. 创建协调器
+        # 12. 创建协调器
         coordinator = self._create_coordinator()
 
-        self.logger.info("=" * 60)
-        self.logger.info("✅ 交易系统构建完成")
-        self.logger.info("=" * 60)
+        self.logger.info("✓ [系统] 交易系统构建完成")
 
         return coordinator
 
@@ -123,7 +135,7 @@ class TradingSystemBuilder:
         """加载配置"""
         self.config = get_config()
         self.logger = get_logger(__name__)
-        self.logger.info("✅ 配置加载完成")
+        self.logger.info("✓ [配置] 加载完成")
 
     async def _setup_data_source(self):
         """设置数据源和交易对"""
@@ -131,20 +143,25 @@ class TradingSystemBuilder:
 
         # 根据配置选择交易所ID
         if self.config.binance_futures:
-            self.exchange_id = "binanceusdm"  # USDT永续合约使用 binanceusdm
+            self.exchange_id = "binanceusdm"  # USDT 永续合约
+            # 数据源同样切换到期货测试网，确保 AccountSync/DB 使用同一 exchange_id
+            self.data_source_id = "binanceusdm"
         else:
-            self.exchange_id = "binance"  # 现货使用 binance
+            self.exchange_id = "binance"
+            self.data_source_id = "binance"
 
         # 交易对
         trading_symbols = self.config.get_data_source_symbols()
         if self.config.binance_futures:
             self.symbols = [f"{pair}:USDT" for pair in trading_symbols]
-            self.logger.info("USDT 永续合约模式，交易对: %s", self.symbols)
+            mode = "USDT永续合约"
         else:
             self.symbols = trading_symbols
-            self.logger.info("现货模式，交易对: %s", self.symbols)
+            mode = "现货"
 
-        self.logger.info(f"数据源: {self.data_source_id}, 交易所: {self.exchange_id}")
+        self.logger.info(
+            f"[交易所] {mode} | 数据源: {self.data_source_id} | 交易所: {self.exchange_id} | 交易对: {self.symbols}"
+        )
 
     async def _setup_perception(self):
         """初始化感知组件"""
@@ -182,7 +199,7 @@ class TradingSystemBuilder:
             target_exchange=self.exchange_id,
         )
 
-        self.logger.info("✅ 感知组件初始化完成")
+        self.logger.info("✓ [感知] 初始化完成")
 
     async def _setup_memory(self):
         """初始化内存组件"""
@@ -195,7 +212,6 @@ class TradingSystemBuilder:
             self.config.openai_api_key
             and not self.config.openai_api_key.lower().startswith("your_")
         ):
-            self.logger.info("初始化 Qdrant 长期记忆库")
             self.long_term_memory = QdrantLongTermMemory(
                 qdrant_url=self.config.qdrant_url,
                 openai_api_key=self.config.openai_api_key,
@@ -203,9 +219,9 @@ class TradingSystemBuilder:
             )
             await self.long_term_memory.initialize()
         else:
-            self.logger.info("跳过长期记忆初始化（未配置 OpenAI API Key）")
+            self.logger.debug("跳过长期记忆初始化（未配置 OpenAI API Key）")
 
-        self.logger.info("✅ 内存组件初始化完成")
+        self.logger.info("✓ [内存] 初始化完成")
 
     async def _setup_execution(self):
         """初始化执行组件"""
@@ -267,23 +283,14 @@ class TradingSystemBuilder:
             paper_trading=not self.config.enable_trading,
             initial_portfolio=initial_portfolio,
             sync_interval_seconds=300,  # 5分钟同步一次，避免频繁API调用
+            db_manager=self.db_manager,  # 传递数据库管理器
+            # account_sync_service 将在 _setup_account_sync() 后设置
         )
 
         if not self.config.enable_trading:
-            self.logger.warning("当前处于纸面交易模式（未启用真实下单）。")
+            self.logger.warning("[交易] 纸面交易模式（未启用真实下单）")
         else:
-            # 真实交易模式：启动时强制同步一次获取真实持仓
-            try:
-                await self.portfolio_manager.get_current_portfolio(force_sync=True)
-                self.logger.info("✅ 已连接到交易所并同步持仓")
-            except Exception as e:
-                self.logger.error(f"无法连接到交易所: {e}")
-                self.logger.warning("⚠️  由于交易所连接失败，将回退到纸面交易模式")
-                # 回退到纸面交易模式
-                self.portfolio_manager.paper_trading = True
-                self.portfolio_manager._portfolio_cache = initial_portfolio
-
-        self.logger.info("✅ 执行组件初始化完成")
+            self.logger.info("✓ [交易] 真实交易模式")
 
     async def _setup_database(self):
         """初始化数据库"""
@@ -292,14 +299,14 @@ class TradingSystemBuilder:
             echo=False
         )
         # get_db_manager() 内部已经调用了 initialize()
-        self.logger.info("✅ 数据库初始化完成")
+        self.logger.info("✓ [数据库] 初始化完成")
 
     async def _setup_data_collector(self):
         """初始化数据采集服务"""
         # 获取DAO实例用于保存K线数据
-        # 使用新的KlineDataManager替代旧的MarketDataCollector
+        # 使用新的KlineManager替代旧的MarketDataCollector
         # 传入db_manager而不是dao，让每个采集任务创建独立session
-        self.kline_manager = KlineDataManager(
+        self.kline_manager = KlineManager(
             symbols=self.symbols,
             market_collector=self.market_collector,
             short_term_memory=self.short_term_memory,
@@ -320,13 +327,13 @@ class TradingSystemBuilder:
         )
 
         # 初始化清理器
-        self.kline_cleaner = KlineDataCleaner(
+        self.kline_cleaner = KlineCleaner(
             kline_manager=self.kline_manager,
             cleanup_interval=86400,  # 每24小时清理一次
             logger=self.logger,
         )
 
-        self.logger.info("✅ K线数据管理服务初始化完成")
+        self.logger.info("✓ [K线服务] 初始化完成")
 
     async def _setup_trading_executor(self):
         """初始化交易执行服务"""
@@ -347,7 +354,45 @@ class TradingSystemBuilder:
             enable_trading=self.config.enable_trading,
             logger=self.logger,
         )
-        self.logger.info("✅ 交易执行服务初始化完成")
+        self.logger.info("✓ [交易执行] 初始化完成")
+
+    async def _setup_account_sync(self):
+        """初始化账户同步服务"""
+        # 只在启用真实交易时才启动账户同步服务
+        if not self.config.enable_trading:
+            self.logger.info("纸面交易模式下跳过账户同步服务")
+            return
+
+        # 检查是否配置了 API Key
+        if not (self.config.binance_api_key and self.config.binance_api_secret):
+            self.logger.warning("未配置 API Key，跳过账户同步服务")
+            return
+
+        try:
+            # 初始化 ExchangeService（单例模式，从配置文件自动读取）
+            self.exchange_service = ExchangeService()
+
+            # 创建账户同步服务
+            self.account_sync_service = AccountSyncService(
+                exchange_service=self.exchange_service,
+                db_manager=self.db_manager,
+                sync_interval=10,  # 每10秒同步一次
+                db_exchange_name=self.exchange_id or "binance",
+            )
+
+            # 启动同步服务
+            await self.account_sync_service.start()
+
+            # 将账户同步服务设置到 PortfolioManager 中
+            if self.portfolio_manager:
+                self.portfolio_manager.account_sync_service = self.account_sync_service
+
+            self.logger.info("✓ [账户同步] 初始化完成 (间隔: 10秒)")
+
+        except Exception as e:
+            self.logger.error(f"[账户同步] 初始化失败: {e}", exc_info=True)
+            # 不抛出异常，允许系统在没有账户同步的情况下继续运行
+            self.account_sync_service = None
 
     async def _setup_layered_decision(self):
         """初始化分层决策架构 (可选)"""
@@ -365,19 +410,19 @@ class TradingSystemBuilder:
             # 根据配置初始化 LLM 客户端
             if self.config.ai_provider == "qwen":
                 from src.decision import QwenClient
-                self.logger.info(f"🤖 使用千问模型: {self.config.qwen_model}")
                 llm_client = QwenClient(
                     api_key=self.config.qwen_api_key,
                     base_url=self.config.qwen_base_url,
                     model=self.config.qwen_model,
                 )
+                model_info = f"千问 {self.config.qwen_model}"
             else:
-                self.logger.info(f"🤖 使用DeepSeek模型: {self.config.deepseek_model}")
                 llm_client = DeepSeekClient(
                     api_key=self.config.deepseek_api_key,
                     base_url=self.config.deepseek_base_url,
                     model=self.config.deepseek_model,
                 )
+                model_info = f"DeepSeek {self.config.deepseek_model}"
 
             # 创建 RAGMemoryRetrieval
             memory_retrieval = RAGMemoryRetrieval(
@@ -424,7 +469,7 @@ class TradingSystemBuilder:
                 database_manager=self.db_manager,  # 传入数据库管理器用于保存决策
             )
 
-            self.logger.info("✅ 分层决策架构初始化完成")
+            self.logger.info(f"✓ [AI决策] 初始化完成 | 模型: {model_info}")
 
         except Exception as exc:
             self.logger.error("分层决策架构初始化失败: %s", exc, exc_info=True)
@@ -460,6 +505,8 @@ class TradingSystemBuilder:
             kline_manager=self.kline_manager,
             kline_cleaner=self.kline_cleaner,
             market_analyzer=self.market_analyzer,
+            account_sync_service=self.account_sync_service,
+            performance_service=self.performance_service,
             logger=self.logger,
         )
 
@@ -467,11 +514,53 @@ class TradingSystemBuilder:
         """清理所有资源"""
         self.logger.info("开始清理资源...")
 
+        # 停止账户同步服务
+        if self.account_sync_service:
+            try:
+                await self.account_sync_service.stop()
+            except Exception as exc:
+                self.logger.warning("停止 account_sync_service 失败: %s", exc)
+            finally:
+                self.account_sync_service = None
+
+        # 关闭 ExchangeService
+        if self.exchange_service:
+            try:
+                await self.exchange_service.close()
+            except Exception as exc:
+                self.logger.warning("关闭 exchange_service 失败: %s", exc)
+            finally:
+                self.exchange_service = None
+
         if self.data_collector:
-            await self.data_collector.stop()
+            try:
+                await self.data_collector.stop()
+            except Exception as exc:
+                self.logger.warning("停止 data_collector 失败: %s", exc)
+
+        if self.kline_manager:
+            try:
+                await self.kline_manager.stop()
+            except Exception as exc:
+                self.logger.warning("停止 kline_manager 失败: %s", exc)
+            finally:
+                self.kline_manager = None
+
+        if self.kline_cleaner:
+            try:
+                await self.kline_cleaner.stop()
+            except Exception as exc:
+                self.logger.warning("停止 kline_cleaner 失败: %s", exc)
+            finally:
+                self.kline_cleaner = None
 
         if self.market_collector:
-            await self.market_collector.close()
+            try:
+                await self.market_collector.close()
+            except Exception as exc:
+                self.logger.warning("关闭 market_collector 失败: %s", exc)
+            finally:
+                self.market_collector = None
 
         if self.short_term_memory:
             await self.short_term_memory.close()
@@ -480,18 +569,51 @@ class TradingSystemBuilder:
             await self.long_term_memory.close()
 
         if self.order_executor:
-            await self.order_executor.close()
+            try:
+                await self.order_executor.close()
+            except Exception as exc:
+                self.logger.warning("关闭 order_executor 失败: %s", exc)
+            finally:
+                self.order_executor = None
 
         if self.portfolio_manager:
-            await self.portfolio_manager.close()
+            try:
+                await self.portfolio_manager.close()
+            except Exception as exc:
+                self.logger.warning("关闭 portfolio_manager 失败: %s", exc)
+            finally:
+                self.portfolio_manager = None
 
         if self.db_manager:
-            await self.db_manager.close()
+            try:
+                await self.db_manager.close()
+            except Exception as exc:
+                self.logger.warning("关闭数据库失败: %s", exc)
+            finally:
+                self.db_manager = None
 
         if self.environment_builder and hasattr(self.environment_builder, 'close'):
             await self.environment_builder.close()
 
         # 关闭全局 HTTP 客户端
         await close_global_http_client()
+        await close_exchange_service()
 
         self.logger.info("✅ 资源清理完成")
+
+    async def _setup_performance_service(self):
+        """初始化绩效服务"""
+        try:
+            from src.services.performance_service import PerformanceService
+            
+            # 创建绩效服务
+            self.performance_service = PerformanceService(
+                db_manager=self.db_manager,
+                exchange_name=self.exchange_id or "binanceusdm"
+            )
+
+            self.logger.info("✓ [绩效服务] 初始化完成 (每日凌晨00:10自动计算)")
+
+        except Exception as e:
+            self.logger.error(f"[绩效服务] 初始化失败: {e}", exc_info=True)
+            # 不抛出异常，允许系统在没有绩效服务的情况下继续运行

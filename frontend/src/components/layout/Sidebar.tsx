@@ -29,7 +29,7 @@ const navItems = [
     icon: LayoutDashboard,
   },
   {
-    title: "交易概览",
+    title: "交易面板",
     href: "/trading",
     icon: TrendingUp,
   },

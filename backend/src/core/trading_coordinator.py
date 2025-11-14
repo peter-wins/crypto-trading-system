@@ -14,7 +14,7 @@ from decimal import Decimal
 
 from src.models.decision import StrategyConfig, TradingSignal, SignalType
 from src.models.portfolio import Portfolio
-from src.perception.data_collector import MarketDataCollector
+from src.services.market_data import MarketDataCollector
 from src.execution.trading_executor import TradingExecutor
 from src.execution.portfolio import PortfolioManager
 from src.core.config import Config
@@ -42,6 +42,8 @@ class TradingCoordinator:
         kline_manager: Optional[Any] = None,  # KlineDataManager
         kline_cleaner: Optional[Any] = None,  # KlineDataCleaner
         market_analyzer: Optional[Any] = None,  # MarketAnalyzer
+        account_sync_service: Optional[Any] = None,  # AccountSyncService
+        performance_service: Optional[Any] = None,  # PerformanceService
         logger: Optional[logging.Logger] = None,
     ):
         """
@@ -57,6 +59,8 @@ class TradingCoordinator:
             kline_manager: K线数据管理器 (多周期采集)
             kline_cleaner: K线数据清理器
             market_analyzer: 市场分析器 (技术指标→简洁摘要)
+            account_sync_service: 账户同步服务
+            performance_service: 绩效服务
             logger: 日志记录器
         """
         self.config = config
@@ -68,6 +72,8 @@ class TradingCoordinator:
         self.kline_manager = kline_manager
         self.kline_cleaner = kline_cleaner
         self.market_analyzer = market_analyzer
+        self.account_sync_service = account_sync_service
+        self.performance_service = performance_service
         self.logger = logger or logging.getLogger(__name__)
 
         self.running = False
@@ -81,7 +87,7 @@ class TradingCoordinator:
 
             self.running = True
             self.logger.info("\n" + "=" * 60)
-            self.logger.info("启动分层决策主循环")
+            self.logger.info("✓ [分层决策] 主循环已启动")
             self.logger.info("=" * 60)
 
             if not self.config.enable_trading:
@@ -93,12 +99,17 @@ class TradingCoordinator:
             # 启动多周期K线数据管理器
             if self.kline_manager:
                 await self.kline_manager.start()
-                self.logger.info("✅ K线数据管理器已启动")
+                self.logger.info("✓ [K线服务] 数据管理器已启动")
 
             # 启动K线数据清理任务
             if self.kline_cleaner:
                 await self.kline_cleaner.start()
-                self.logger.info("✅ K线数据清理任务已启动")
+                self.logger.debug("✓ [K线清理] 任务已启动")
+
+            # 启动绩效服务
+            if self.performance_service:
+                await self.performance_service.start()
+                self.logger.info("✓ [绩效服务] 已启动")
 
             # 首次运行战略层分析
             await self._run_initial_strategist_cycle()
@@ -154,19 +165,15 @@ class TradingCoordinator:
                     signals, snapshots, strategy, portfolio
                 )
 
-                # 6. 执行完成后，重新获取最新持仓并保存快照
+                # 6. 如果执行了交易，保存快照
                 try:
                     if latest_portfolio:
-                        portfolio_after = latest_portfolio
-                        self.logger.info("📸 使用执行结果中的最新持仓状态")
+                        # 只有在执行了交易时才保存快照
+                        if self.layered_coordinator:
+                            await self.layered_coordinator._save_snapshots(latest_portfolio)
+                            self.logger.info("✅ 交易执行后快照已保存")
                     else:
-                        self.logger.info("📸 重新获取最新持仓状态...")
-                        portfolio_after = await self.portfolio_manager.get_current_portfolio()
-
-                    # 保存执行后的持仓快照
-                    if self.layered_coordinator:
-                        await self.layered_coordinator._save_snapshots(portfolio_after)
-                        self.logger.info("✅ 执行后快照已保存")
+                        self.logger.debug("本轮无交易执行，跳过快照保存（由 AccountSyncService 持续同步）")
                 except Exception as exc:
                     self.logger.error("保存执行后快照失败: %s", exc, exc_info=True)
 
@@ -202,6 +209,11 @@ class TradingCoordinator:
         if self.kline_cleaner:
             await self.kline_cleaner.stop()
             self.logger.info("K线数据清理任务已停止")
+
+        # 停止绩效服务
+        if self.performance_service:
+            await self.performance_service.stop()
+            self.logger.info("绩效服务已停止")
 
     # ------------------------------------------------------------------ #
     # 内部辅助方法

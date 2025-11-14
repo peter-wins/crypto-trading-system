@@ -85,7 +85,7 @@ async def get_closed_positions(
 
     try:
         from src.api.server import get_app_state
-        from src.database.dao import TradingDAO
+        from src.services.database import TradingDAO
 
         app_state = get_app_state()
         db_manager = app_state.get("db_manager")
@@ -110,7 +110,7 @@ async def get_closed_positions(
                 start_date=start_date_obj,
                 end_date=end_date_obj,
                 limit=limit,
-                exchange_name="binance"
+                exchange_name="binanceusdm"
             )
 
             # 转换为响应格式
@@ -175,7 +175,7 @@ async def get_order_history(
 
     try:
         from src.api.server import get_app_state
-        from src.database.dao import TradingDAO
+        from src.services.database import TradingDAO
         from datetime import datetime as dt
 
         app_state = get_app_state()
@@ -202,7 +202,7 @@ async def get_order_history(
                 start_time=start_datetime,
                 end_time=end_datetime,
                 limit=limit,
-                exchange_name="binance"
+                exchange_name="binanceusdm"
             )
 
             # 转换为响应格式

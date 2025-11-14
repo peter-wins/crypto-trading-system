@@ -51,7 +51,7 @@ class RateLimiter:
         # 锁，确保线程安全
         self._lock = asyncio.Lock()
 
-        logger.info(
+        logger.debug(
             f"RateLimiter initialized: {requests_per_second} req/s, "
             f"burst={self.burst_size}"
         )
@@ -150,7 +150,7 @@ class ExchangeRateLimiters:
 
     def __init__(self):
         self._limiters: Dict[str, RateLimiter] = {}
-        logger.info("ExchangeRateLimiters initialized")
+        logger.debug("ExchangeRateLimiters initialized")
 
     def get_limiter(self, exchange_name: str = "binance") -> RateLimiter:
         """
@@ -170,7 +170,7 @@ class ExchangeRateLimiters:
             self._limiters[exchange_name] = RateLimiter(
                 requests_per_second=rate
             )
-            logger.info(f"Created rate limiter for {exchange_name}: {rate} req/s")
+            logger.debug(f"Created rate limiter for {exchange_name}: {rate} req/s")
 
         return self._limiters[exchange_name]
 

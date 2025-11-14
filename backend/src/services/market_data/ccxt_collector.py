@@ -46,7 +46,7 @@ class CCXTMarketDataCollector:
             # 加载市场信息
             await self.exchange.load_markets()
 
-            self.logger.info(
+            self.logger.debug(
                 f"Initialized {self.exchange_id} market data collector"
             )
         except Exception as e:
