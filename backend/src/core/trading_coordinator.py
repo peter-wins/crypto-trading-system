@@ -39,8 +39,6 @@ class TradingCoordinator:
         portfolio_manager: PortfolioManager,
         decision_maker: Optional[Any] = None,  # LLMTrader or simple rules
         layered_coordinator: Optional[Any] = None,  # LayeredDecisionCoordinator
-        kline_manager: Optional[Any] = None,  # KlineDataManager
-        kline_cleaner: Optional[Any] = None,  # KlineDataCleaner
         market_analyzer: Optional[Any] = None,  # MarketAnalyzer
         account_sync_service: Optional[Any] = None,  # AccountSyncService
         performance_service: Optional[Any] = None,  # PerformanceService
@@ -56,8 +54,6 @@ class TradingCoordinator:
             portfolio_manager: 投资组合管理器
             decision_maker: 决策生成器 (传统模式)
             layered_coordinator: 分层决策协调器 (分层模式)
-            kline_manager: K线数据管理器 (多周期采集)
-            kline_cleaner: K线数据清理器
             market_analyzer: 市场分析器 (技术指标→简洁摘要)
             account_sync_service: 账户同步服务
             performance_service: 绩效服务
@@ -69,8 +65,6 @@ class TradingCoordinator:
         self.portfolio_manager = portfolio_manager
         self.decision_maker = decision_maker
         self.layered_coordinator = layered_coordinator
-        self.kline_manager = kline_manager
-        self.kline_cleaner = kline_cleaner
         self.market_analyzer = market_analyzer
         self.account_sync_service = account_sync_service
         self.performance_service = performance_service
@@ -96,16 +90,6 @@ class TradingCoordinator:
             # 启动数据采集服务
             await self.data_collector.start()
 
-            # 启动多周期K线数据管理器
-            if self.kline_manager:
-                await self.kline_manager.start()
-                self.logger.info("✓ [K线服务] 数据管理器已启动")
-
-            # 启动K线数据清理任务
-            if self.kline_cleaner:
-                await self.kline_cleaner.start()
-                self.logger.debug("✓ [K线清理] 任务已启动")
-
             # 启动绩效服务
             if self.performance_service:
                 await self.performance_service.start()
@@ -117,14 +101,28 @@ class TradingCoordinator:
             # 战术层主循环
             trader_cycles = 0
             strategist_interval_cycles = self.config.strategist_interval // self.config.trader_interval
+            self.logger.info(
+                f"[循环配置] 战略层间隔: {self.config.strategist_interval}秒, "
+                f"战术层间隔: {self.config.trader_interval}秒, "
+                f"每 {strategist_interval_cycles} 个战术周期执行一次战略分析"
+            )
 
             while self.running:
                 trader_cycles += 1
 
                 # 定期运行战略层
                 if trader_cycles % strategist_interval_cycles == 0:
+                    self.logger.info(f"[战略触发] 第 {trader_cycles} 个战术周期，触发战略层分析")
                     await self._run_strategist_cycle()
                     trader_cycles = 0
+                else:
+                    # 每10个周期记录一次进度
+                    if trader_cycles % 10 == 0:
+                        remaining = strategist_interval_cycles - trader_cycles
+                        self.logger.debug(
+                            f"[战略倒计时] 第 {trader_cycles}/{strategist_interval_cycles} 个周期, "
+                            f"还有 {remaining} 个周期后执行战略分析"
+                        )
 
                 # 1. 收集市场数据快照
                 snapshots = await self._collect_snapshots()
@@ -200,16 +198,6 @@ class TradingCoordinator:
         if self.data_collector:
             await self.data_collector.stop()
 
-        # 停止K线数据管理器
-        if self.kline_manager:
-            await self.kline_manager.stop()
-            self.logger.info("K线数据管理器已停止")
-
-        # 停止清理任务
-        if self.kline_cleaner:
-            await self.kline_cleaner.stop()
-            self.logger.info("K线数据清理任务已停止")
-
         # 停止绩效服务
         if self.performance_service:
             await self.performance_service.stop()
@@ -220,58 +208,15 @@ class TradingCoordinator:
     # ------------------------------------------------------------------ #
 
     async def _collect_snapshots(self) -> Dict[str, Dict[str, Any]]:
-        """
-        收集所有交易对的市场数据快照
-
-        优先使用kline_manager+market_analyzer生成简洁的市场摘要,
-        如果不可用则回退到data_collector的原始指标
-        """
+        """收集所有交易对的市场数据快照（直接来自实时采集器）"""
         snapshots = {}
 
-        # 临时禁用market_analyzer,回退到旧格式
-        # TODO: 等market_analyzer修复后再启用
-        if False and self.kline_manager and self.market_analyzer:
-            for symbol in self.symbols:
-                try:
-                    # 1. 获取实时最新价格(从data_collector)
-                    old_snapshot = self.data_collector.get_latest_snapshot(symbol)
-                    if not old_snapshot or "latest_price" not in old_snapshot:
-                        self.logger.warning("%s 无法获取实时价格，跳过本轮", symbol)
-                        continue
-
-                    latest_price = old_snapshot["latest_price"]
-
-                    # 2. 获取1小时K线数据用于技术分析
-                    klines = await self.kline_manager.get_klines(symbol, "1h", limit=100)
-                    if not klines or len(klines) < 50:
-                        self.logger.warning("%s K线数据不足，跳过本轮", symbol)
-                        continue
-
-                    # 3. 使用market_analyzer生成市场摘要
-                    market_summary = self.market_analyzer.analyze(symbol, "1h", klines)
-
-                    # 4. 构建snapshot,使用实时价格+技术分析摘要
-                    snapshot = {
-                        "symbol": symbol,
-                        "latest_price": latest_price,  # 使用实时价格,不是K线的收盘价
-                        "market_summary": market_summary.to_prompt(),  # 简洁的文本摘要
-                    }
-                    snapshots[symbol] = snapshot
-
-                except Exception as e:
-                    self.logger.warning("%s 生成市场摘要失败: %s，尝试使用原始指标", symbol, e)
-                    # 回退到原始方式
-                    snapshot = self.data_collector.get_latest_snapshot(symbol)
-                    if snapshot:
-                        snapshots[symbol] = snapshot
-        else:
-            # 回退到原始data_collector方式
-            for symbol in self.symbols:
-                snapshot = self.data_collector.get_latest_snapshot(symbol)
-                if snapshot:
-                    snapshots[symbol] = snapshot
-                else:
-                    self.logger.warning("%s 暂无缓存数据，跳过本轮", symbol)
+        for symbol in self.symbols:
+            snapshot = self.data_collector.get_latest_snapshot(symbol)
+            if snapshot:
+                snapshots[symbol] = snapshot
+            else:
+                self.logger.warning("%s 暂无缓存数据，跳过本轮", symbol)
 
         return snapshots
 
@@ -360,21 +305,50 @@ class TradingCoordinator:
 
     async def _run_initial_strategist_cycle(self):
         """首次运行战略层分析"""
+        import time
+        start_time = time.time()
+
         self.logger.info("\n" + "=" * 60)
         self.logger.info("执行首次战略层分析")
         self.logger.info("=" * 60)
 
         try:
-            # 获取加密市场概览
+            # 获取加密市场概览（带超时）
+            self.logger.info("[计时] 开始获取加密市场概览...")
+            t1 = time.time()
+
             from src.perception.crypto_overview import CryptoOverviewCollector
             crypto_collector = CryptoOverviewCollector()
             try:
-                crypto_overview = await crypto_collector.get_market_overview()
+                crypto_overview = await asyncio.wait_for(
+                    crypto_collector.get_market_overview(),
+                    timeout=15.0  # 15秒超时
+                )
+            except asyncio.TimeoutError:
+                self.logger.warning("加密市场概览获取超时（15秒），跳过")
+                crypto_overview = None
             finally:
                 await crypto_collector.close()
 
-            await self.layered_coordinator.run_strategist_cycle(crypto_overview)
-            self.logger.info("✅ 战略层分析完成")
+            t2 = time.time()
+            self.logger.info(f"[计时] 加密市场概览获取完成，耗时: {t2-t1:.2f}秒")
+
+            # 战略层LLM分析（带超时）
+            self.logger.info("[计时] 开始执行战略层LLM分析...")
+            t3 = time.time()
+            try:
+                await asyncio.wait_for(
+                    self.layered_coordinator.run_strategist_cycle(crypto_overview),
+                    timeout=120.0  # 2分钟超时
+                )
+            except asyncio.TimeoutError:
+                self.logger.error("战略层LLM分析超时（120秒），将使用默认策略")
+                raise
+            t4 = time.time()
+            self.logger.info(f"[计时] 战略层LLM分析完成，耗时: {t4-t3:.2f}秒")
+
+            total_time = time.time() - start_time
+            self.logger.info(f"✅ 战略层分析完成，总耗时: {total_time:.2f}秒")
         except Exception as exc:
             self.logger.error("战略层分析失败: %s", exc, exc_info=True)
             self.logger.warning("将继续运行，但可能影响决策质量")

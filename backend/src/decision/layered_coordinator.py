@@ -67,13 +67,20 @@ class LayeredDecisionCoordinator:
         Returns:
             MarketRegime: 市场状态判断
         """
+        import time
+        start_time = time.time()
+
         logger.info("=" * 80)
         logger.info("战略层分析周期开始")
         logger.info("=" * 80)
 
         try:
             # 1. 采集市场环境
+            logger.info("[计时] 开始构建市场环境...")
+            t1 = time.time()
             environment = await self.environment_builder.build_environment()
+            t2 = time.time()
+            logger.info(f"[计时] 市场环境构建完成，耗时: {t2-t1:.2f}秒")
 
             if not environment.is_ready_for_analysis():
                 logger.warning(
@@ -82,10 +89,14 @@ class LayeredDecisionCoordinator:
                 )
 
             # 2. 战略层分析
+            logger.info("[计时] 开始战略层LLM推理...")
+            t3 = time.time()
             regime = await self.strategist.analyze_market_with_environment(
                 environment=environment,
                 crypto_overview=crypto_overview,
             )
+            t4 = time.time()
+            logger.info(f"[计时] 战略层LLM推理完成，耗时: {t4-t3:.2f}秒")
 
             # 3. 缓存结果
             self.current_regime = regime
@@ -95,7 +106,14 @@ class LayeredDecisionCoordinator:
             logger.info("有效期至: %s", datetime.fromtimestamp(regime.valid_until / 1000))
 
             # 4. 保存战略层决策到数据库
+            logger.info("[计时] 开始保存战略决策到数据库...")
+            t5 = time.time()
             await self._save_strategic_decision(regime, environment)
+            t6 = time.time()
+            logger.info(f"[计时] 战略决策保存完成，耗时: {t6-t5:.2f}秒")
+
+            total_time = time.time() - start_time
+            logger.info(f"[计时] 战略层周期总耗时: {total_time:.2f}秒")
 
             return regime
 
@@ -144,40 +162,8 @@ class LayeredDecisionCoordinator:
                 # 这里选择使用过期的 regime 但记录警告
                 logger.info("使用过期的 regime 继续交易 (降低置信度)")
 
-            # 2. 根据 regime 筛选币种
-            recommended = self.current_regime.get_recommended_symbols_for_trading()
-            logger.info(f"战略层推荐关注: {recommended}")
-
-            # 只分析推荐的币种
-            # 支持多种格式匹配：BTC, BTC/USDT, BTC/USDT:USDT
-            def matches_recommendation(full_symbol: str, recommended_list: list) -> bool:
-                """检查完整交易对是否匹配推荐的基础符号"""
-                # 提取基础符号（BTC/USDT:USDT -> BTC）
-                base = full_symbol.split('/')[0]
-                # 提取交易对（BTC/USDT:USDT -> BTC/USDT）
-                pair = full_symbol.split(':')[0] if ':' in full_symbol else full_symbol
-
-                # 匹配任意格式
-                return (
-                    base in recommended_list or
-                    pair in recommended_list or
-                    full_symbol in recommended_list
-                )
-
-            filtered_snapshots = {
-                symbol: snapshot
-                for symbol, snapshot in symbols_snapshots.items()
-                if matches_recommendation(symbol, recommended)
-            }
-
-            if not filtered_snapshots:
-                logger.warning("没有推荐的币种需要分析")
-                logger.warning(f"  可用币种: {list(symbols_snapshots.keys())}")
-                logger.warning(f"  推荐币种: {recommended}")
-                logger.warning("  提示: 确保配置的 DATA_SOURCE_SYMBOLS 包含推荐的币种")
-                return {}
-
-            logger.info(f"实际分析币种: {list(filtered_snapshots.keys())}")
+            filtered_snapshots = symbols_snapshots
+            logger.info(f"战术层分析币种: {list(filtered_snapshots.keys())}")
 
             # 3. 生成交易信号
             signals = await self.trader.batch_generate_signals_with_regime(
@@ -289,23 +275,22 @@ class LayeredDecisionCoordinator:
 
     def _create_default_regime(self) -> MarketRegime:
         """创建保守的默认市场状态"""
-        from src.models.regime import RegimeType, RiskLevel, TimeHorizon
+        from src.models.regime import MarketBias, MarketStructure, RiskLevel, TimeHorizon
 
         now = datetime.now(timezone.utc)
         timestamp = int(now.timestamp() * 1000)
 
         return MarketRegime(
-            regime=RegimeType.SIDEWAYS,
+            bias=MarketBias.NEUTRAL,
             confidence=0.3,
-            recommended_symbols=["BTC", "ETH"],
-            max_symbols_to_trade=2,
-            blacklist_symbols=[],
+            market_structure=MarketStructure.RANGING,
             risk_level=RiskLevel.MEDIUM,
             market_narrative="无有效市场环境数据,采用保守策略",
             key_drivers=["数据不完整"],
             time_horizon=TimeHorizon.SHORT,
-            suggested_allocation={"BTC": 0.5, "ETH": 0.3},
             cash_ratio=0.7,  # 保守:70%现金
+            volatility_range="medium",
+            max_exposure=0.4,
             trading_mode="conservative",
             position_sizing_multiplier=0.5,  # 减半仓位
             timestamp=timestamp,
@@ -354,17 +339,16 @@ class LayeredDecisionCoordinator:
 
             # 决策内容（MarketRegime的JSON表示）
             decision_content = {
-                "regime": regime.regime.value,
+                "bias": regime.bias.value,
+                "market_structure": regime.market_structure.value,
                 "confidence": regime.confidence,
-                "recommended_symbols": regime.recommended_symbols,
-                "max_symbols_to_trade": regime.max_symbols_to_trade,
-                "blacklist_symbols": regime.blacklist_symbols,
                 "risk_level": regime.risk_level.value,
                 "market_narrative": regime.market_narrative,
                 "key_drivers": regime.key_drivers,
                 "time_horizon": regime.time_horizon.value,
-                "suggested_allocation": regime.suggested_allocation,
                 "cash_ratio": float(regime.cash_ratio),
+                "volatility_range": regime.volatility_range,
+                "max_exposure": float(regime.max_exposure) if regime.max_exposure is not None else None,
                 "trading_mode": regime.trading_mode,
                 "position_sizing_multiplier": float(regime.position_sizing_multiplier),
             }
@@ -377,7 +361,7 @@ class LayeredDecisionCoordinator:
                 thought_process=regime.reasoning,
                 tools_used=[],
                 decision=json.dumps(decision_content, ensure_ascii=False),
-                action_taken=f"推荐币种: {', '.join(regime.recommended_symbols)}",
+                action_taken=f"偏向: {regime.bias.value}, 结构: {regime.market_structure.value}",
                 decision_layer="strategic",
                 model_used=self.strategist.llm.model,  # 从实际使用的LLM客户端获取
                 tokens_used=None,
@@ -424,7 +408,8 @@ class LayeredDecisionCoordinator:
                     input_context = {
                         "symbol": symbol,
                         # 战略信息
-                        "regime": self.current_regime.regime.value if self.current_regime else "unknown",
+                        "bias": self.current_regime.bias.value if self.current_regime else "unknown",
+                        "market_structure": self.current_regime.market_structure.value if self.current_regime else "unknown",
                         "risk_level": self.current_regime.risk_level.value if self.current_regime else "unknown",
                         "trading_mode": self.current_regime.trading_mode if self.current_regime else "unknown",
                         "cash_ratio": float(self.current_regime.cash_ratio) if self.current_regime else None,

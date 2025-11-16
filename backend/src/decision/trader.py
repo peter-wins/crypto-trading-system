@@ -85,6 +85,7 @@ class LLMTrader:
         self.tools = tool_registry
         self.memory = memory_retrieval
         self.max_tool_iterations = max_tool_iterations
+        self.market_collector = None  # optional: set by builder if needed
 
     async def batch_generate_signals_with_regime(
         self,
@@ -109,7 +110,7 @@ class LLMTrader:
             return {}
 
         logger.info(
-            f"战术层开始批量分析 (市场状态: {market_regime.regime.value}, "
+            f"战术层开始批量分析 (偏向: {market_regime.bias.value}, "
             f"风险等级: {market_regime.risk_level.value})"
         )
 
@@ -452,7 +453,7 @@ class LLMTrader:
             f"  止盈价: {position.take_profit or '未设置'}"
         )
 
-    def _format_market_snapshot(self, snapshot: Dict[str, Any]) -> str:
+    def _format_market_snapshot(self, snapshot: Dict[str, Any], symbol: Optional[str] = None) -> str:
         """格式化市场数据快照"""
         if not snapshot:
             return "暂无市场数据"
@@ -523,11 +524,98 @@ class LLMTrader:
                 direction = "上升" if plus_di > minus_di else "下降"
                 lines.append(f"  ADX(14): {adx:.2f} ({trend_strength}, {direction})")
 
+            if snapshot.get("support"):
+                support = float(snapshot["support"])
+                dist_support = snapshot.get("distance_to_support_pct")
+                dist_text = f"{dist_support:.2f}%" if isinstance(dist_support, (int, float)) else "未知"
+                lines.append(f"  支撑: {support:.2f} (距现价 {dist_text})")
+            if snapshot.get("resistance"):
+                resistance = float(snapshot["resistance"])
+                dist_res = snapshot.get("distance_to_resistance_pct")
+                dist_res_text = f"{dist_res:.2f}%" if isinstance(dist_res, (int, float)) else "未知"
+                lines.append(f"  阻力: {resistance:.2f} (距现价 {dist_res_text})")
+            if snapshot.get("volatility_state"):
+                lines.append(f"  波动状态: {snapshot.get('volatility_state')}")
+            if snapshot.get("volume_state"):
+                lines.append(f"  成交量: {snapshot.get('volume_state')}")
+
+            short_term = snapshot.get("short_term")
+            if not short_term and symbol:
+                short_term = self._get_intraday_from_collector(symbol, "5m")
+            if short_term:
+                lines.append(
+                    f"  [5m] RSI={short_term.get('rsi', 0):.1f}, "
+                    f"MA20={short_term.get('ma20', 0):.0f}({short_term.get('price_vs_ma20', '')}), "
+                    f"波动={short_term.get('volatility')}, 量能={short_term.get('volume_state')}"
+                )
+
+            mid_term = snapshot.get("mid_term")
+            if not mid_term and symbol:
+                mid_term = self._get_intraday_from_collector(symbol, "15m")
+            if mid_term:
+                lines.append(
+                    f"  [15m] RSI={mid_term.get('rsi', 0):.1f}, "
+                    f"MA20={mid_term.get('ma20', 0):.0f}({mid_term.get('price_vs_ma20', '')}), "
+                    f"波动={mid_term.get('volatility')}, 量能={mid_term.get('volume_state')}"
+                )
+
             return "\n".join(lines)
 
         except Exception as exc:
             logger.warning("格式化市场数据失败: %s", exc)
             return "市场数据解析失败"
+
+    def _extract_indicator_context(self, symbol: str, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        """提炼结构化指标，供提示词直接引用"""
+        context: Dict[str, Any] = {}
+        try:
+            rsi = snapshot.get("rsi")
+            if rsi is not None:
+                context["1h_RSI"] = f"{float(rsi):.1f}"
+            adx = snapshot.get("adx")
+            if adx is not None:
+                context["1h_ADX"] = f"{float(adx):.1f}"
+            atr = snapshot.get("atr")
+            if atr is not None:
+                context["1h_ATR"] = f"{float(atr):.2f}"
+            if snapshot.get("volatility_state"):
+                context["波动状态"] = snapshot["volatility_state"]
+            if snapshot.get("volume_state"):
+                context["量能状态"] = snapshot["volume_state"]
+            if snapshot.get("support"):
+                context["支撑位"] = f"{float(snapshot['support']):,.2f}"
+                dist = snapshot.get("distance_to_support_pct")
+                if isinstance(dist, (int, float)):
+                    context["距支撑"] = f"{dist:.2f}%"
+            if snapshot.get("resistance"):
+                context["阻力位"] = f"{float(snapshot['resistance']):,.2f}"
+                dist = snapshot.get("distance_to_resistance_pct")
+                if isinstance(dist, (int, float)):
+                    context["距阻力"] = f"{dist:.2f}%"
+            short_term = snapshot.get("short_term") or self._get_intraday_from_collector(symbol, "5m")
+            if short_term:
+                context["5m_RSI"] = f"{short_term.get('rsi', 0):.1f}"
+                context["5m_波动"] = short_term.get("volatility", "")
+                context["5m_量能"] = short_term.get("volume_state", "")
+            mid_term = snapshot.get("mid_term") or self._get_intraday_from_collector(symbol, "15m")
+            if mid_term:
+                context["15m_RSI"] = f"{mid_term.get('rsi', 0):.1f}"
+                context["15m_波动"] = mid_term.get("volatility", "")
+                context["15m_量能"] = mid_term.get("volume_state", "")
+        except Exception as exc:  # pylint:disable=broad-except
+            logger.debug("提取结构化指标失败 %s: %s", symbol, exc)
+        return context
+
+    def _get_intraday_from_collector(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
+        if not self.market_collector:
+            return None
+        getter = getattr(self.market_collector, "get_intraday_summary_cached", None)
+        if not getter:
+            return None
+        try:
+            return getter(symbol, timeframe)
+        except Exception:  # pylint:disable=broad-except
+            return None
 
     def _format_account_info(self, portfolio: Optional[Portfolio]) -> str:
         """格式化账户总览信息"""
@@ -566,13 +654,17 @@ class LLMTrader:
         account_info = self._format_account_info(portfolio)
 
         # 每个币种的数据和持仓
-        symbols_data = {}
+        symbols_data: Dict[str, Dict[str, Any]] = {}
         portfolio_positions = {}
 
         for symbol, snapshot in symbols_snapshots.items():
             # 格式化市场数据
-            market_data = self._format_market_snapshot(snapshot)
-            symbols_data[symbol] = {"market_data": market_data}
+            market_data = self._format_market_snapshot(snapshot, symbol=symbol)
+            indicator_context = self._extract_indicator_context(symbol, snapshot)
+            symbols_data[symbol] = {
+                "market_data": market_data,
+                "indicator_context": indicator_context,
+            }
 
             # 格式化持仓信息
             position_info = self._format_position_info(symbol, portfolio)
@@ -603,6 +695,9 @@ class LLMTrader:
                 "max_daily_loss": float(risk_config.max_daily_loss * Decimal("100")),
                 "stop_loss_percentage": float(risk_config.stop_loss_percentage),
                 "take_profit_percentage": float(risk_config.take_profit_percentage),
+                "max_exposure": float(market_regime.max_exposure * 100)
+                if market_regime.max_exposure is not None
+                else None,
             },
             "trading_intervals": {
                 "trader_interval_seconds": config.trader_interval,  # 战术层决策间隔
@@ -618,36 +713,18 @@ class LLMTrader:
         account_info = context["account_info"]
         portfolio_positions = context["portfolio_positions"]
         risk_params = context.get("risk_params", {})
-
-        # 构建市场状态摘要
-        regime_summary = f"""
-## 战略层市场判断
-
-{regime.get_summary()}
-
-**市场叙事**: {regime.market_narrative}
-
-**关键驱动因素**:
-{chr(10).join(f"- {driver}" for driver in regime.key_drivers)}
-
-**交易模式**: {regime.trading_mode}
-**建议持仓周期**: {regime.time_horizon.value}
-**仓位调整系数**: {regime.position_sizing_multiplier}x
-**建议现金比例**: {regime.cash_ratio:.0%}
-
-**币种筛选结果**:
-- 推荐关注: {', '.join(regime.recommended_symbols[:10])}
-- 黑名单: {', '.join(regime.blacklist_symbols) if regime.blacklist_symbols else '无'}
-
-**战略判断理由**:
-{regime.reasoning}
-"""
+        symbol_pool = ", ".join(symbols_data.keys()) if symbols_data else "无"
 
         # 构建币种市场数据
         symbols_info = []
         for symbol, data in symbols_data.items():
             symbols_info.append(f"### {symbol}")
             symbols_info.append(data["market_data"])
+            indicator_ctx = data.get("indicator_context")
+            if indicator_ctx:
+                symbols_info.append("**结构化指标:**")
+                for key, value in indicator_ctx.items():
+                    symbols_info.append(f"- {key}: {value}")
             symbols_info.append("")
 
         # 使用模板配置
@@ -668,15 +745,23 @@ class LLMTrader:
             f"{symbol}: {pos}" for symbol, pos in portfolio_positions.items()
         ) if portfolio_positions else "无"
 
+        max_exposure_pct = (
+            f"{regime.max_exposure * 100:.0f}%"
+            if regime.max_exposure is not None
+            else "未指定"
+        )
         prompt = (template
-            .replace("{regime}", regime.regime.value)
+            .replace("{bias}", regime.bias.value)
+            .replace("{market_structure}", regime.market_structure.value)
             .replace("{risk_level}", regime.risk_level.value)
             .replace("{trading_mode}", regime.trading_mode)
             .replace("{position_multiplier}", str(regime.position_sizing_multiplier))
             .replace("{cash_ratio}", f"{regime.cash_ratio:.0%}")
+            .replace("{volatility_range}", regime.volatility_range or "未知")
+            .replace("{max_exposure}", max_exposure_pct)
             .replace("{market_narrative}", regime.market_narrative)
             .replace("{key_drivers}", ', '.join(regime.key_drivers[:3]))
-            .replace("{recommended_symbols}", ', '.join(regime.recommended_symbols[:5]))
+            .replace("{symbol_pool}", symbol_pool)
             .replace("{account_info}", account_info)
             .replace("{portfolio_positions}", positions_str)
             .replace("{symbols_info}", chr(10).join(symbols_info))

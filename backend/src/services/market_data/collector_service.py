@@ -11,8 +11,8 @@ import asyncio
 import logging
 from decimal import Decimal
 from statistics import pstdev
-from typing import Any, Dict, List, Optional
-from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timezone
 
 from src.services.market_data.ccxt_collector import CCXTMarketDataCollector
 from src.perception.indicators import PandasIndicatorCalculator
@@ -71,6 +71,17 @@ class MarketDataCollector:
 
         # 最新的市场快照缓存
         self._last_snapshots: Dict[str, Dict[str, Any]] = {}
+        self.primary_timeframe = "1h"
+        self.cached_timeframes = ["5m", "15m", "1h", "4h", "1d"]
+        self.kline_cache_ttl = {
+            "5m": 120,
+            "15m": 300,
+            "1h": 180,   # 3分钟
+            "4h": 900,   # 15分钟
+            "1d": 3600,  # 1小时
+        }
+        self._kline_cache: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._intraday_cache: Dict[Tuple[str, str], Dict[str, Any]] = {}
 
     async def start(self) -> None:
         """启动后台采集任务"""
@@ -204,6 +215,7 @@ class MarketDataCollector:
             closes: List[Decimal] = [candle.close for candle in ohlcv]
             highs: List[Decimal] = [candle.high for candle in ohlcv]
             lows: List[Decimal] = [candle.low for candle in ohlcv]
+            volumes: List[Decimal] = [candle.volume for candle in ohlcv]
 
             if len(closes) < 5:
                 self.logger.warning("%s 的 K 线样本不足，跳过。", symbol)
@@ -309,6 +321,10 @@ class MarketDataCollector:
                     )
 
             # 构建并缓存快照
+            volatility_state = self._volatility_label(float(volatility / last_close)) if last_close else "未知"
+            volume_state = self._volume_label(volumes)
+            support_info = self._calculate_support_resistance(ohlcv, last_close)
+
             snapshot = {
                 "market_context": market_context,
                 "ticker": ticker,
@@ -321,8 +337,15 @@ class MarketDataCollector:
                 "plus_di": plus_di,
                 "minus_di": minus_di,
                 "latest_price": last_close,
+                "volatility_state": volatility_state,
+                "volume_state": volume_state,
             }
+            if support_info:
+                snapshot.update(support_info)
             self._last_snapshots[symbol] = snapshot
+            # 缓存1h K线数据，供其它模块复用
+            self._cache_klines(symbol, "1h", ohlcv)
+            await self._maybe_refresh_additional_timeframes(symbol)
 
             return snapshot
 
@@ -372,3 +395,200 @@ class MarketDataCollector:
             是否正在运行
         """
         return self.running and self._task is not None and not self._task.done()
+
+    async def get_cached_klines(
+        self,
+        symbol: str,
+        timeframe: str,
+        limit: int = 200,
+        force_refresh: bool = False,
+    ) -> List[Any]:
+        """
+        获取缓存的 K 线数据（必要时会刷新）
+        """
+        key = (symbol, timeframe)
+        cache = self._kline_cache.get(key)
+
+        if force_refresh or self._is_cache_expired(key):
+            await self._refresh_kline_cache(symbol, timeframe)
+            cache = self._kline_cache.get(key)
+
+        if not cache:
+            return []
+
+        klines = cache.get("klines", [])
+        if limit and len(klines) > limit:
+            return klines[-limit:]
+        return klines
+
+    async def _augment_snapshot_with_intraday(self, symbol: str, snapshot: Dict[str, Any]) -> None:
+        """为快照补充短周期行情"""
+        try:
+            short_summary = await self._get_intraday_summary(symbol, "5m")
+            if short_summary:
+                snapshot["short_term"] = short_summary
+                self._intraday_cache[(symbol, "5m")] = short_summary
+
+            mid_summary = await self._get_intraday_summary(symbol, "15m")
+            if mid_summary:
+                snapshot["mid_term"] = mid_summary
+                self._intraday_cache[(symbol, "15m")] = mid_summary
+        except Exception as exc:  # pylint:disable=broad-except
+            self.logger.debug("补充短周期行情失败 %s: %s", symbol, exc)
+
+    async def _get_intraday_summary(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
+        klines = await self.get_cached_klines(symbol, timeframe, limit=120)
+        if not klines:
+            klines = await self.get_cached_klines(
+                symbol, timeframe, limit=120, force_refresh=True
+            )
+        if not klines:
+            try:
+                klines = await self.market_collector.get_ohlcv(symbol, timeframe=timeframe, limit=120)
+                if klines:
+                    self._cache_klines(symbol, timeframe, klines)
+            except Exception as exc:  # pylint: disable=broad-except
+                self.logger.debug("直接获取 %s %s K线失败: %s", symbol, timeframe, exc)
+                return None
+
+        if not klines or len(klines) < 30:
+            return None
+
+        closes = [candle.close for candle in klines]
+        highs = [candle.high for candle in klines]
+        lows = [candle.low for candle in klines]
+        volumes = [candle.volume for candle in klines]
+
+        rsi_value = self.indicator_calculator.calculate_rsi(closes, 14)[-1]
+        ma20 = self.indicator_calculator.calculate_sma(closes, 20)[-1]
+        atr_value = self.indicator_calculator.calculate_atr(highs, lows, closes, 14)[-1]
+        adx_data = self.indicator_calculator.calculate_adx(highs, lows, closes, 14)
+        adx_value = adx_data["adx"][-1] if adx_data.get("adx") else Decimal("0")
+
+        price = closes[-1]
+        price_vs_ma = self._price_vs_ma(price, ma20)
+        vol_state = self._volatility_label(float(atr_value / price)) if price else "未知"
+        volume_state = self._volume_label(volumes)
+
+        return {
+            "timeframe": timeframe,
+            "price": float(price),
+            "rsi": float(rsi_value),
+            "ma20": float(ma20),
+            "price_vs_ma20": price_vs_ma,
+            "atr": float(atr_value),
+            "volatility": vol_state,
+            "volume_state": volume_state,
+            "adx": float(adx_value),
+        }
+
+    def _price_vs_ma(self, price: Decimal, ma: Decimal) -> str:
+        if price > ma:
+            return "上方"
+        if price < ma:
+            return "下方"
+        return "附近"
+
+    def _volume_label(self, volumes: List[Decimal]) -> str:
+        if not volumes:
+            return "未知"
+        recent = [float(v) for v in volumes[-20:] if v is not None]
+        last = float(volumes[-1])
+        if not recent:
+            return "未知"
+        avg = sum(recent) / len(recent)
+        if avg == 0:
+            return "未知"
+        ratio = last / avg
+        if ratio >= 1.3:
+            return "放量"
+        if ratio <= 0.7:
+            return "缩量"
+        return "正常"
+
+    def _volatility_label(self, ratio: float) -> str:
+        if ratio >= 0.02:
+            return "极高"
+        if ratio >= 0.01:
+            return "偏高"
+        if ratio >= 0.005:
+            return "中性"
+        return "低"
+
+    def _calculate_support_resistance(
+        self,
+        ohlcv: List[Any],
+        last_price: Decimal,
+    ) -> Optional[Dict[str, Any]]:
+        if not ohlcv or len(ohlcv) < 10 or not last_price:
+            return None
+
+        window = ohlcv[-40:]
+        highs = [float(candle.high) for candle in window]
+        lows = [float(candle.low) for candle in window]
+        resistance = max(highs) if highs else None
+        support = min(lows) if lows else None
+
+        result: Dict[str, Any] = {}
+        if support:
+            result["support"] = support
+            result["distance_to_support_pct"] = (
+                float(((last_price - Decimal(str(support))) / last_price) * 100)
+                if last_price and support
+                else None
+            )
+        if resistance:
+            result["resistance"] = resistance
+            result["distance_to_resistance_pct"] = (
+                float(((Decimal(str(resistance)) - last_price) / last_price) * 100)
+                if last_price and resistance
+                else None
+            )
+        return result or None
+
+    def get_intraday_summary_cached(self, symbol: str, timeframe: str) -> Optional[Dict[str, Any]]:
+        """提供给交易层获取最新的短周期摘要"""
+        return self._intraday_cache.get((symbol, timeframe))
+
+    def _cache_klines(self, symbol: str, timeframe: str, klines: List[Any]) -> None:
+        """缓存K线数据（仅保留最近500根）"""
+        if not klines:
+            return
+        key = (symbol, timeframe)
+        max_length = 500
+        trimmed = klines[-max_length:] if len(klines) > max_length else list(klines)
+        self._kline_cache[key] = {
+            "klines": trimmed,
+            "updated_at": datetime.now(timezone.utc),
+        }
+
+    def _is_cache_expired(self, key: Tuple[str, str]) -> bool:
+        cache = self._kline_cache.get(key)
+        if not cache:
+            return True
+        ttl = self.kline_cache_ttl.get(key[1], 300)
+        updated_at = cache.get("updated_at")
+        if not updated_at:
+            return True
+        return (datetime.now(timezone.utc) - updated_at).total_seconds() > ttl
+
+    async def _refresh_kline_cache(self, symbol: str, timeframe: str) -> None:
+        try:
+            klines = await self.market_collector.get_ohlcv(symbol, timeframe=timeframe, limit=200)
+            if klines:
+                self._cache_klines(symbol, timeframe, klines)
+        except Exception as exc:  # pylint: disable=broad-except
+            self.logger.debug("刷新 %s %s K线缓存失败: %s", symbol, timeframe, exc)
+
+    async def _maybe_refresh_additional_timeframes(self, symbol: str) -> None:
+        """按需刷新额外时间周期的K线缓存"""
+        tasks = []
+        for timeframe in self.cached_timeframes:
+            if timeframe == self.primary_timeframe:
+                continue
+            key = (symbol, timeframe)
+            if self._is_cache_expired(key):
+                tasks.append(self._refresh_kline_cache(symbol, timeframe))
+
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)

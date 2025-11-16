@@ -18,8 +18,6 @@ from src.services.market_data import CCXTMarketDataCollector
 from src.perception.indicators import PandasIndicatorCalculator
 from src.services.market_data import MarketDataCollector
 from src.perception.symbol_mapper import SymbolMapper
-from src.services.kline import KlineManager
-from src.services.kline import KlineCleaner
 from src.perception.market_analyzer import MarketAnalyzer
 from src.memory.short_term import RedisShortTermMemory
 from src.memory.long_term import QdrantLongTermMemory
@@ -56,8 +54,7 @@ class TradingSystemBuilder:
         self.indicator_calculator: Optional[PandasIndicatorCalculator] = None
         self.market_analyzer: Optional[MarketAnalyzer] = None
         self.data_collector: Optional[MarketDataCollector] = None
-        self.kline_manager: Optional[KlineManager] = None
-        self.kline_cleaner: Optional[KlineCleaner] = None
+
 
         self.short_term_memory: Optional[RedisShortTermMemory] = None
         self.long_term_memory: Optional[any] = None
@@ -303,18 +300,7 @@ class TradingSystemBuilder:
 
     async def _setup_data_collector(self):
         """初始化数据采集服务"""
-        # 获取DAO实例用于保存K线数据
-        # 使用新的KlineManager替代旧的MarketDataCollector
-        # 传入db_manager而不是dao，让每个采集任务创建独立session
-        self.kline_manager = KlineManager(
-            symbols=self.symbols,
-            market_collector=self.market_collector,
-            short_term_memory=self.short_term_memory,
-            db_manager=self.db_manager if hasattr(self, 'db_manager') else None,
-            logger=self.logger,
-        )
-
-        # 保留旧的data_collector用于兼容性（单周期1h采集）
+        # 仅使用实时采集器，暂不启用多周期 K 线管理
         self.data_collector = MarketDataCollector(
             symbols=self.symbols,
             market_collector=self.market_collector,
@@ -322,18 +308,11 @@ class TradingSystemBuilder:
             short_term_memory=self.short_term_memory,
             collection_interval=self.config.data_collection_interval,
             logger=self.logger,
-            dao=None,  # 不需要dao，K线保存由kline_manager统一管理
-            save_klines=False,  # 关闭保存，由kline_manager统一管理
+            dao=None,
+            save_klines=False,
         )
 
-        # 初始化清理器
-        self.kline_cleaner = KlineCleaner(
-            kline_manager=self.kline_manager,
-            cleanup_interval=86400,  # 每24小时清理一次
-            logger=self.logger,
-        )
-
-        self.logger.info("✓ [K线服务] 初始化完成")
+        self.logger.info("✓ [采集] 实时数据采集器初始化完成（关闭 K 线管理器）")
 
     async def _setup_trading_executor(self):
         """初始化交易执行服务"""
@@ -444,6 +423,8 @@ class TradingSystemBuilder:
                 memory_retrieval=memory_retrieval,
                 tool_registry=tool_registry,
                 symbols=self.symbols,
+                market_collector=self.data_collector,
+                indicator_calculator=self.indicator_calculator,
             )
 
             trader = LLMTrader(
@@ -451,6 +432,7 @@ class TradingSystemBuilder:
                 tool_registry=tool_registry,
                 memory_retrieval=memory_retrieval,
             )
+            trader.market_collector = self.data_collector
 
             # 环境构建器
             self.environment_builder = EnvironmentBuilder(
@@ -502,8 +484,6 @@ class TradingSystemBuilder:
             portfolio_manager=self.portfolio_manager,
             decision_maker=None,  # 传统模式的决策器
             layered_coordinator=self.layered_coordinator,
-            kline_manager=self.kline_manager,
-            kline_cleaner=self.kline_cleaner,
             market_analyzer=self.market_analyzer,
             account_sync_service=self.account_sync_service,
             performance_service=self.performance_service,
@@ -537,22 +517,6 @@ class TradingSystemBuilder:
                 await self.data_collector.stop()
             except Exception as exc:
                 self.logger.warning("停止 data_collector 失败: %s", exc)
-
-        if self.kline_manager:
-            try:
-                await self.kline_manager.stop()
-            except Exception as exc:
-                self.logger.warning("停止 kline_manager 失败: %s", exc)
-            finally:
-                self.kline_manager = None
-
-        if self.kline_cleaner:
-            try:
-                await self.kline_cleaner.stop()
-            except Exception as exc:
-                self.logger.warning("停止 kline_cleaner 失败: %s", exc)
-            finally:
-                self.kline_cleaner = None
 
         if self.market_collector:
             try:

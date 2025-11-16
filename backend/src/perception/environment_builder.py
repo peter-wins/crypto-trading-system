@@ -61,23 +61,41 @@ class EnvironmentBuilder:
         并行采集所有数据源,构建 MarketEnvironment 对象
         失败的数据源会被标记为 None,不影响整体流程
         """
+        import time
         logger.info("开始构建市场环境...")
 
-        # 并行采集所有数据(新闻除外,因为较慢)
+        # 并行采集所有数据(新闻除外,因为较慢) - 每个任务都有15秒超时
+        async def fetch_with_timeout_and_log(name, coro, timeout=15.0):
+            """带超时和日志的数据获取"""
+            t1 = time.time()
+            try:
+                result = await asyncio.wait_for(coro, timeout=timeout)
+                t2 = time.time()
+                logger.info(f"[环境数据] {name} 获取成功，耗时: {t2-t1:.2f}秒")
+                return result
+            except asyncio.TimeoutError:
+                t2 = time.time()
+                logger.warning(f"[环境数据] {name} 获取超时（{timeout}秒），跳过")
+                return None
+            except Exception as e:
+                t2 = time.time()
+                logger.warning(f"[环境数据] {name} 获取失败（{t2-t1:.2f}秒）: {str(e)[:100]}")
+                return None
+
         tasks = [
-            self.sentiment_collector.get_sentiment_data(),
-            self.macro_collector.get_macro_data(),
-            self.stock_collector.get_stock_market_data(),
-            self.crypto_collector.get_market_overview(),
+            fetch_with_timeout_and_log("情绪数据", self.sentiment_collector.get_sentiment_data()),
+            fetch_with_timeout_and_log("宏观数据", self.macro_collector.get_macro_data()),
+            fetch_with_timeout_and_log("美股数据", self.stock_collector.get_stock_market_data()),
+            fetch_with_timeout_and_log("加密概览", self.crypto_collector.get_market_overview()),
         ]
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        results = await asyncio.gather(*tasks)
 
         # 解包结果
-        sentiment = results[0] if not isinstance(results[0], Exception) else None
-        macro = results[1] if not isinstance(results[1], Exception) else None
-        stock_market = results[2] if not isinstance(results[2], Exception) else None
-        crypto_overview = results[3] if not isinstance(results[3], Exception) else None
+        sentiment = results[0]
+        macro = results[1]
+        stock_market = results[2]
+        crypto_overview = results[3]
 
         # 获取新闻(如果启用)
         recent_news = []

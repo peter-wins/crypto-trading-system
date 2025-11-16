@@ -32,17 +32,17 @@ class PromptTemplateConfig:
             "strategist": {
                 "system": (
                     "你是专业的加密货币宏观策略分析师(战略层)。"
-                    "你每{strategist_interval_hours}小时被调用一次，负责判断市场regime、筛选币种、设定风险参数，为战术层提供决策指导。"
+                    "你每{strategist_interval_hours}小时被调用一次，负责判断市场偏向(偏多/偏空/中性)、市场结构(趋势/震荡/极端波动)、设定风险与现金比例，并为战术层提供指导。"
                     "原则：风险优先、资本保护。输出JSON。"
                 ),
                 "risk_emphasis": "风险优先、严格止损",
-                "cash_ratios": "牛0.2-0.3, 熊0.6-0.8, 恐慌0.9-1.0",
+                "cash_ratios": "偏多0.10-0.20, 中性0.30-0.50, 偏空/极端0.60-0.90",
             },
             "trader": {
                 "system": (
                     "你是专业的加密货币交易员(战术层)。"
                     "你每{trader_interval_minutes}分钟被调用一次，负责分析技术指标并生成交易信号。"
-                    "战略层每{strategist_interval_hours}小时提供一次宏观判断和币种筛选。"
+                    "战略层每{strategist_interval_hours}小时提供一次宏观偏向与风险约束（不再推荐具体币种）。"
                     "原则：风险收益比>2.0、严格止损、优先资本保护。输出JSON数组。"
                 ),
                 "risk_reward_ratio": ">2.0",
@@ -62,17 +62,17 @@ class PromptTemplateConfig:
             "strategist": {
                 "system": (
                     "你是专业的加密货币宏观策略分析师(战略层)。"
-                    "你每{strategist_interval_hours}小时被调用一次，负责判断市场regime、筛选币种、设定风险参数，为战术层提供决策指导。"
+                    "你每{strategist_interval_hours}小时被调用一次，负责判断市场偏向、市场结构与风险预算，并为战术层提供决策指导。"
                     "原则：数据驱动、风险收益平衡。输出JSON。"
                 ),
                 "risk_emphasis": "风险收益平衡",
-                "cash_ratios": "牛0.1-0.2, 熊0.4-0.6, 恐慌0.7-0.9",
+                "cash_ratios": "偏多0.10-0.20, 中性0.30-0.50, 偏空/极端0.60-0.90",
             },
             "trader": {
                 "system": (
                     "你是专业的加密货币交易员(战术层)。"
                     "你每{trader_interval_minutes}分钟被调用一次，负责分析技术指标并生成交易信号。"
-                    "战略层每{strategist_interval_hours}小时提供一次宏观判断和币种筛选。"
+                    "战略层每{strategist_interval_hours}小时提供一次宏观偏向和风险约束。"
                     "原则：风险收益比>1.2、抓住优质机会、适度风控。输出JSON数组，每个币种一个信号。"
                 ),
                 "risk_reward_ratio": ">1.2",
@@ -92,17 +92,17 @@ class PromptTemplateConfig:
             "strategist": {
                 "system": (
                     "你是专业的加密货币宏观策略分析师(战略层)。"
-                    "你每{strategist_interval_hours}小时被调用一次，负责判断市场regime、筛选币种、设定风险参数，为战术层提供决策指导。"
+                    "你每{strategist_interval_hours}小时被调用一次，负责判断市场偏向、市场结构、风险承受区间，为战术层提供决策指导。"
                     "原则：机会优先、积极进取。输出JSON。"
                 ),
                 "risk_emphasis": "机会优先，积极进取",
-                "cash_ratios": "牛0.05-0.1, 熊0.2-0.4, 恐慌0.5-0.7",
+                "cash_ratios": "偏多0.05-0.15, 中性0.25-0.45, 偏空/极端0.55-0.85",
             },
             "trader": {
                 "system": (
                     "你是专业的加密货币交易员(战术层)。"
                     "你每{trader_interval_minutes}分钟被调用一次，负责分析技术指标并生成交易信号。"
-                    "战略层每{strategist_interval_hours}小时提供一次宏观判断和币种筛选。"
+                    "战略层每{strategist_interval_hours}小时提供一次宏观偏向与风险指引（不再推荐币种）。"
                     "原则：风险收益比>1.0、抓住趋势、适度止损。输出JSON数组。"
                 ),
                 "risk_reward_ratio": ">1.0",
@@ -139,43 +139,50 @@ class PromptTemplateConfig:
 # 市场环境
 %s
 
-# 加密市场数据
+# BTC 多周期行情
 %s
 
-# 可交易币种池
+# ETH 多周期行情
+%s
+
+# 加密市场概况
+%s
+
+# 系统配置的交易对
 %s
 
 # 任务
-分析市场regime并输出JSON:
+基于宏观/情绪与 BTC 行情给出市场偏向与结构，并输出 JSON。
 
-**Regime分类**: bull(牛)/bear(熊)/sideways(震荡)/panic(恐慌)
+**Bias分类**: bullish(偏多)/bearish(偏空)/neutral(中性)
+**Market_structure**: trending(趋势)/ranging(震荡)/extreme(极端波动)
 **Risk_level**: low/medium/high/extreme
-**风险管理**: %s
-**币种筛选**: 从可交易币种池中选择。牛市→多币种, 熊市→BTC/ETH优先, 震荡→3-5个, 恐慌→BTC/ETH
-**现金比例**: %s
+**风险管理重点**: %s
+**现金比例指引**: %s
 
 **JSON格式** (示例):
 {
-    "regime": "bull",
-    "confidence": 0.75,
-    "recommended_symbols": ["BTC","ETH"],
-    "max_symbols_to_trade": 5,
-    "blacklist_symbols": [],
+    "bias": "bullish",
+    "market_structure": "trending",
+    "confidence": 0.78,
+    "volatility_range": "medium",
     "risk_level": "medium",
-    "market_narrative": "1-2句话总结",
+    "market_narrative": "1-2句话总结市场逻辑",
     "key_drivers": ["驱动因素1","驱动因素2"],
     "time_horizon": "medium",
-    "suggested_allocation": {"BTC":0.5,"ETH":0.3},
-    "cash_ratio": 0.2,
+    "cash_ratio": 0.35,
+    "max_exposure": 0.4,
     "trading_mode": "normal",
-    "position_sizing_multiplier": 1.0,
-    "reasoning": "分析逻辑和风险"
+    "position_sizing_multiplier": 0.8,
+    "reasoning": "详细解释偏向、结构及风险"
 }
 
 输出JSON:
 """
         return template % (
             "{env_summary}",
+            "{btc_market}",
+            "{eth_market}",
             "{crypto_summary}",
             "{available_symbols}",
             config['risk_emphasis'],
@@ -191,10 +198,13 @@ class PromptTemplateConfig:
         # 使用 %s 占位符避免花括号冲突
         template = """
 # 战略判断
-Regime: %s | 风险: %s | 模式: %s | 仓位系数: %sx | 现金目标: %s
+偏向: %s | 结构: %s | 风险: %s | 模式: %s | 仓位系数: %sx | 现金目标: %s
+波动区间: {volatility_range} | 最大仓位暴露: {max_exposure}
 叙事: %s
 驱动: %s
-推荐: %s
+
+# 可交易币种
+%s
 
 # 账户信息
 %s
@@ -206,7 +216,7 @@ Regime: %s | 风险: %s | 模式: %s | 仓位系数: %sx | 现金目标: %s
 %s
 
 # 任务
-基于战略指导和技术分析,为每个币种生成**多空双向**交易信号
+结合战略指导与多周期技术数据（包括1h/4h/1d以及5m/15m的动能、量能、波动、支撑/阻力距离）为每个币种生成**多空双向**交易信号。
 
 **策略风格**: %s
 **风险收益比要求**: %s
@@ -238,11 +248,13 @@ Regime: %s | 风险: %s | 模式: %s | 仓位系数: %sx | 现金目标: %s
 
 **重要提醒**:
 1. **期货仓位计算**: 使用杠杆后的保证金占比，不是名义价值
-2. **持仓状态分析**: 当前持仓的方向(多/空)、杠杆倍数、强平价格、盈亏情况、持仓时长
-3. **避免方向冲突**: 如已有多头持仓，不要开空仓；已有空头持仓，不要开多仓
-4. **合理分配仓位**: 计算保证金占比，不能超过{max_position_size}%%，否则风控不通过
-5. **平仓决策**: 结合市场行情、技术指标、持仓时长和盈亏情况，自主判断是否需要平仓(止损/止盈已在开仓时挂单，无需手动平仓)
-6. **交易纪律**: 作为专业交易员，避免被市场噪音误导，让盈利持仓充分发展，避免频繁开平同一币种
+2. **多周期校验**: 除1h/4h/1d外，需要引用5m/15m RSI/MA/ATR、量能/波动状态确认动能是否一致
+3. **支撑/阻力**: 参考快照中的最近支撑/阻力与距离，若风险收益比或止损空间不足，请避免开仓
+4. **持仓状态分析**: 当前持仓的方向(多/空)、杠杆倍数、强平价格、盈亏情况、持仓时长
+5. **避免方向冲突**: 如已有多头持仓，不要开空仓；已有空头持仓，不要开多仓
+6. **合理分配仓位**: 计算保证金占比，不得超过{max_position_size}%%，并遵守战略层 `cash_ratio`/`max_exposure` 限制
+7. **平仓决策**: 结合市场行情、短周期信号、持仓时长和盈亏情况，自主判断是否需要平仓(止损/止盈已在开仓时挂单，无需手动平仓)
+8. **交易纪律**: 作为专业交易员，避免被市场噪音误导，让盈利持仓充分发展，避免频繁开平同一币种
 
 **JSON格式** (示例):
 [
@@ -270,14 +282,15 @@ Regime: %s | 风险: %s | 模式: %s | 仓位系数: %sx | 现金目标: %s
 输出JSON:%s
 """
         return template % (
-            "{regime}",
+            "{bias}",
+            "{market_structure}",
             "{risk_level}",
             "{trading_mode}",
             "{position_multiplier}",
             "{cash_ratio}",
             "{market_narrative}",
             "{key_drivers}",
-            "{recommended_symbols}",
+            "{symbol_pool}",
             "{account_info}",
             "{portfolio_positions}",
             "{symbols_info}",

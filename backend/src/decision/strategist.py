@@ -21,7 +21,9 @@ from src.models.performance import PerformanceMetrics
 from src.models.portfolio import Portfolio
 from src.models.decision import StrategyConfig
 from src.models.environment import MarketEnvironment
-from src.models.regime import MarketRegime, RegimeType, RiskLevel, TimeHorizon
+from src.models.regime import MarketRegime, MarketBias, MarketStructure, RiskLevel, TimeHorizon
+from src.services.market_data import MarketDataCollector
+from src.perception.indicators import PandasIndicatorCalculator
 
 
 logger = get_logger(__name__)
@@ -88,12 +90,116 @@ class LLMStrategist:
         *,
         symbols: Optional[List[str]] = None,
         max_tool_iterations: int = 6,  # 增加到6次，允许更充分的分析
+        market_collector: Optional[MarketDataCollector] = None,
+        indicator_calculator: Optional[PandasIndicatorCalculator] = None,
     ) -> None:
         self.llm = llm_client
         self.memory = memory_retrieval
         self.tools = tool_registry
         self.symbols = symbols or []
         self.max_tool_iterations = max_tool_iterations
+        self.market_collector = market_collector
+        self.indicator_calculator = indicator_calculator
+        self._btc_symbol = self._detect_symbol("BTC")
+
+    def _detect_symbol(self, base: str) -> Optional[str]:
+        """根据配置匹配指定基础币种"""
+        base = base.upper()
+        for symbol in self.symbols:
+            if symbol.upper().startswith(f"{base}/"):
+                return symbol
+        if any(":USDT" in symbol for symbol in self.symbols):
+            return f"{base}/USDT:USDT"
+        if base in ("BTC", "ETH"):
+            return f"{base}/USDT"
+        return None
+
+    @staticmethod
+    def _safe_float(value: Optional[Decimal]) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _infer_trend_label(self, price: Decimal, fast: Decimal, slow: Decimal) -> str:
+        try:
+            if price > fast > slow:
+                return "上升"
+            if price < fast < slow:
+                return "下降"
+            return "震荡"
+        except Exception:  # pylint: disable=broad-except
+            return "不确定"
+
+    @staticmethod
+    def _describe_volatility(ratio: float) -> str:
+        if ratio >= 0.02:
+            return "极高"
+        if ratio >= 0.01:
+            return "偏高"
+        if ratio >= 0.005:
+            return "中性"
+        return "低"
+
+    async def _build_symbol_market_section(self, symbol: Optional[str], label: str) -> str:
+        """生成多周期行情摘要"""
+        if not symbol or not self.market_collector or not self.indicator_calculator:
+            return f"{label} 行情: 当前未启用实时采集或数据不可用。"
+
+        tf_config = [("1h", "短期(1h)"), ("4h", "中期(4h)"), ("1d", "长周期(1d)")]
+        lines: List[str] = [f"## {label} 多周期行情"]
+
+        for timeframe, label_text in tf_config:
+            try:
+                klines = await self.market_collector.get_cached_klines(
+                    symbol, timeframe=timeframe, limit=120
+                )
+                if not klines:
+                    await self.market_collector.get_cached_klines(
+                        symbol, timeframe=timeframe, limit=120, force_refresh=True
+                    )
+                    klines = await self.market_collector.get_cached_klines(
+                        symbol, timeframe=timeframe, limit=120
+                    )
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.debug("获取 %s %s K线失败: %s", symbol, timeframe, exc)
+                continue
+
+            if not klines or len(klines) < 50:
+                continue
+
+            closes = [candle.close for candle in klines]
+            highs = [candle.high for candle in klines]
+            lows = [candle.low for candle in klines]
+            price = closes[-1]
+            prev_close = closes[-2] if len(closes) > 1 else price
+
+            rsi_value = self.indicator_calculator.calculate_rsi(closes, 14)[-1]
+            ma20 = self.indicator_calculator.calculate_sma(closes, 20)[-1]
+            ma50 = self.indicator_calculator.calculate_sma(closes, 50)[-1]
+            atr_value = self.indicator_calculator.calculate_atr(highs, lows, closes, 14)[-1]
+            adx_data = self.indicator_calculator.calculate_adx(highs, lows, closes, 14)
+            adx_value = adx_data["adx"][-1]
+
+            trend = self._infer_trend_label(price, ma20, ma50)
+            change_pct = (
+                ((price - prev_close) / prev_close * Decimal("100"))
+                if prev_close and prev_close != 0
+                else Decimal("0")
+            )
+            vol_ratio = float(atr_value / price) if price and price != 0 else 0.0
+            volatility = self._describe_volatility(vol_ratio)
+
+            lines.append(
+                f"- {label_text}: 收盘 {self._safe_float(price):,.2f}，"
+                f"涨跌 {self._safe_float(change_pct):+.2f}%%，RSI={self._safe_float(rsi_value):.1f}，"
+                f"MA20={self._safe_float(ma20):.0f}，MA50={self._safe_float(ma50):.0f}，"
+                f"趋势={trend}，波动={volatility} (ATR={self._safe_float(atr_value):.2f}，ADX={self._safe_float(adx_value):.1f})"
+            )
+
+        if len(lines) == 1:
+            return "BTC行情: K线数据不足，改用宏观判断。"
+        return "\n".join(lines)
 
     async def analyze_market_regime(self, symbol: str) -> Dict[str, Any]:
         """Analyse market environment and return regime classification."""
@@ -105,9 +211,9 @@ class LLMStrategist:
                     f"请分析 {symbol} 的当前市场状态。需要步骤：\n"
                     "1. 使用 market_data_query 获取最新价格数据\n"
                     "2. 使用 technical_analysis 获取主要技术指标\n"
-                    "3. 综合判断市场属于牛市、熊市或震荡\n"
+                    "3. 综合判断当前偏向（bullish/bearish/neutral）与市场结构（trending/ranging/extreme）\n"
                     "4. 输出 JSON: "
-                    '{"regime": "...", "confidence": 0-1, "key_factors": [...], "reasoning": "..."}'
+                    '{"bias": "...", "market_structure": "...", "confidence": 0-1, "key_factors": [...], "reasoning": "..."}'
                 ),
             ),
         ]
@@ -115,16 +221,17 @@ class LLMStrategist:
         response = await self._chat_with_tools(messages)
         data = _try_parse_json(response.content)
 
-        regime = data.get("regime", "unknown")
+        bias = data.get("bias", "unknown")
         confidence = float(data.get("confidence", 0.5))
         reasoning = data.get("reasoning") or response.content or ""
         key_factors = data.get("key_factors") or []
 
         result = {
-            "regime": regime,
+            "bias": bias,
             "confidence": confidence,
             "reasoning": reasoning,
             "key_factors": key_factors,
+            "market_structure": data.get("market_structure", "unknown"),
         }
 
         logger.info("Market regime analysis completed: %s", result)
@@ -153,20 +260,16 @@ class LLMStrategist:
         env_summary = self._build_environment_summary(environment)
 
         # 构建加密市场概览
-        crypto_summary = ""
+        crypto_summary = "暂无"
         if crypto_overview:
-            # 转换 Decimal 为 float 以支持 JSON 序列化
-            def decimal_to_float(obj):
-                if isinstance(obj, dict):
-                    return {k: decimal_to_float(v) for k, v in obj.items()}
-                elif isinstance(obj, list):
-                    return [decimal_to_float(item) for item in obj]
-                elif isinstance(obj, Decimal):
-                    return float(obj)
-                return obj
-
-            crypto_overview_serializable = decimal_to_float(crypto_overview)
-            crypto_summary = json.dumps(crypto_overview_serializable, ensure_ascii=False, indent=2)
+            lines = ["- 总市值: ${:,.0f}".format(float(crypto_overview.get("total_market_cap", 0)))]
+            if crypto_overview.get("market_cap_change_24h") is not None:
+                lines.append(f"- 市值24h变化: {crypto_overview['market_cap_change_24h']:+.2f}%")
+            if crypto_overview.get("btc_dominance") is not None:
+                lines.append(f"- BTC市值占比: {crypto_overview['btc_dominance']:.1f}%")
+            if crypto_overview.get("total_volume_24h") is not None:
+                lines.append("- 24h成交量: ${:,.0f}".format(float(crypto_overview["total_volume_24h"])))
+            crypto_summary = "\n".join(lines)
 
         # 使用模板配置
         from src.decision.prompt_templates import PromptTemplateConfig, PromptStyle
@@ -186,9 +289,16 @@ class LLMStrategist:
         # 移除合约后缀，只显示基础交易对
         clean_symbols = [s.replace(':USDT', '') for s in available_symbols]
         symbols_str = f"可选币种: {', '.join(clean_symbols)}" if clean_symbols else "可选币种: 无"
+        btc_market_summary = await self._build_symbol_market_section(self._btc_symbol, "BTC")
+        eth_symbol = self._detect_symbol("ETH")
+        eth_market_summary = ""
+        if eth_symbol:
+            eth_market_summary = await self._build_symbol_market_section(eth_symbol, "ETH")
 
-        prompt = (template
-            .replace("{env_summary}", env_summary)
+        prompt = (
+            template.replace("{env_summary}", env_summary)
+            .replace("{btc_market}", btc_market_summary)
+            .replace("{eth_market}", eth_market_summary or "暂无ETH数据")
             .replace("{crypto_summary}", crypto_summary if crypto_summary else "暂无")
             .replace("{available_symbols}", symbols_str)
         )
@@ -226,13 +336,21 @@ class LLMStrategist:
             logger.error(f"LLM响应内容无法解析为JSON: {response.content[:500] if response.content else 'None'}")
             raise DecisionError("LLM 未返回有效的市场状态判断,请检查响应格式")
 
-        # 解析 regime
-        regime_str = data.get("regime", "sideways")
+        # 解析 bias
+        bias_str = str(data.get("bias", "neutral")).lower().strip()
         try:
-            regime = RegimeType(regime_str)
+            bias = MarketBias(bias_str)
         except ValueError:
-            logger.warning(f"未知的 regime 类型: {regime_str}, 默认为 sideways")
-            regime = RegimeType.SIDEWAYS
+            logger.warning(f"未知的 bias 类型: {bias_str}, 默认为 neutral")
+            bias = MarketBias.NEUTRAL
+
+        # 解析 market_structure
+        structure_str = str(data.get("market_structure", "ranging")).lower().strip()
+        try:
+            market_structure = MarketStructure(structure_str)
+        except ValueError:
+            logger.warning(f"未知的 market_structure: {structure_str}, 默认为 ranging")
+            market_structure = MarketStructure.RANGING
 
         # 解析 risk_level
         risk_str = data.get("risk_level", "medium")
@@ -272,17 +390,20 @@ class LLMStrategist:
 
         # 构建 MarketRegime
         market_regime = MarketRegime(
-            regime=regime,
+            bias=bias,
+            market_structure=market_structure,
             confidence=float(data.get("confidence", 0.5)),
-            recommended_symbols=data.get("recommended_symbols", []),
-            max_symbols_to_trade=int(data.get("max_symbols_to_trade", 5)),
-            blacklist_symbols=data.get("blacklist_symbols", []),
             risk_level=risk_level,
             market_narrative=data.get("market_narrative", ""),
             key_drivers=data.get("key_drivers", []),
+            volatility_range=data.get("volatility_range"),
             time_horizon=time_horizon,
-            suggested_allocation=data.get("suggested_allocation", {}),
             cash_ratio=float(data.get("cash_ratio", 0.3)),
+            max_exposure=(
+                float(data.get("max_exposure"))
+                if data.get("max_exposure") is not None
+                else None
+            ),
             trading_mode=data.get("trading_mode", "normal"),
             position_sizing_multiplier=float(data.get("position_sizing_multiplier", 1.0)),
             timestamp=timestamp,
@@ -291,15 +412,12 @@ class LLMStrategist:
             reasoning=data.get("reasoning", response.content or ""),
         )
 
-        logger.info(
-            f"战略层分析完成: {market_regime.get_summary()}"
-        )
-
         return market_regime
 
     def _build_environment_summary(self, environment: MarketEnvironment) -> str:
         """构建环境数据的文本摘要供 LLM 分析"""
         parts = []
+        structured: Dict[str, Any] = {}
 
         # 宏观数据
         if environment.macro:
@@ -321,6 +439,16 @@ class LLMStrategist:
                 parts.append(f"- 黄金价格: ${macro.gold_price}/oz")
             if macro.oil_price is not None:
                 parts.append(f"- 原油价格: ${macro.oil_price}/barrel")
+            structured["macro"] = {
+                "fed_rate": macro.fed_rate,
+                "fed_rate_trend": macro.fed_rate_trend,
+                "cpi": macro.cpi,
+                "unemployment": macro.unemployment,
+                "dxy": macro.dxy,
+                "dxy_change_24h": macro.dxy_change_24h,
+                "gold_price": macro.gold_price,
+                "oil_price": macro.oil_price,
+            }
 
         # 美股数据
         if environment.stock_market:
@@ -342,6 +470,16 @@ class LLMStrategist:
                 parts.append(f"- MSTR股价: ${stock.mstr_stock}")
             if stock.mstr_change_24h is not None:
                 parts.append(f"- MSTR 24h变化: {stock.mstr_change_24h:+.2f}%")
+            structured["equities"] = {
+                "sp500": stock.sp500,
+                "sp500_change_24h": stock.sp500_change_24h,
+                "nasdaq": stock.nasdaq,
+                "nasdaq_change_24h": stock.nasdaq_change_24h,
+                "coin": stock.coin_stock,
+                "coin_change_24h": stock.coin_change_24h,
+                "mstr": stock.mstr_stock,
+                "mstr_change_24h": stock.mstr_change_24h,
+            }
 
         # 情绪数据
         if environment.sentiment:
@@ -361,6 +499,23 @@ class LLMStrategist:
                 parts.append(f"- BTC多空比: {sentiment.btc_long_short_ratio:.2f}")
             if sentiment.eth_long_short_ratio is not None:
                 parts.append(f"- ETH多空比: {sentiment.eth_long_short_ratio:.2f}")
+            fg = sentiment.get_overall_sentiment()
+            funding_values = [
+                v for v in [sentiment.btc_funding_rate, sentiment.eth_funding_rate]
+                if v is not None
+            ]
+            structured["sentiment"] = {
+                "fear_greed_index": sentiment.fear_greed_index,
+                "fear_greed_label": sentiment.fear_greed_label,
+                "overall": fg,
+                "btc_funding_rate": sentiment.btc_funding_rate,
+                "eth_funding_rate": sentiment.eth_funding_rate,
+                "funding_avg": (
+                    sum(funding_values) / len(funding_values) if funding_values else None
+                ),
+                "btc_long_short": sentiment.btc_long_short_ratio,
+                "eth_long_short": sentiment.eth_long_short_ratio,
+            }
 
         # 新闻事件
         if environment.recent_news:
@@ -371,18 +526,25 @@ class LLMStrategist:
                     f"(情绪: {news.sentiment}, 来源: {news.source})"
                 )
 
-        # 加密市场概览
-        if environment.crypto_market_cap is not None:
-            parts.append("\n## 加密市场")
-            parts.append(f"- 总市值: ${environment.crypto_market_cap}")
-        if environment.crypto_market_cap_change_24h is not None:
-            parts.append(
-                f"- 市值24h变化: {environment.crypto_market_cap_change_24h:+.2f}%"
-            )
-        if environment.btc_dominance is not None:
-            parts.append(f"- BTC市值占比: {environment.btc_dominance:.1f}%")
-
         parts.append(f"\n数据完整度: {environment.data_completeness:.0%}")
+
+        def _convert(obj: Any):
+            if isinstance(obj, dict):
+                return {k: _convert(v) for k, v in obj.items() if v is not None}
+            if isinstance(obj, list):
+                return [_convert(v) for v in obj]
+            if isinstance(obj, Decimal):
+                return float(obj)
+            return obj
+
+        structured_filtered = _convert(structured)
+        if structured_filtered:
+            parts.append("\n### 结构化指标")
+            parts.append(
+                "```json\n"
+                + json.dumps(structured_filtered, ensure_ascii=False, indent=2)
+                + "\n```"
+            )
 
         return "\n".join(parts)
 

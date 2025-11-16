@@ -951,14 +951,10 @@ class AccountSyncService:
             if position.opened_at:
                 since_ms = max(int(position.opened_at) - self._entry_fee_lookback_ms, 0)
 
-            params = {}
-            if since_ms:
-                params['since'] = since_ms
-
             trades = await self.exchange_service.fetch_my_trades(
                 symbol=position.symbol,
-                limit=200,
-                params=params or None
+                since=since_ms,
+                limit=200
             )
 
             if not trades:
