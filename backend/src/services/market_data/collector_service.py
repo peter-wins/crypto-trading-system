@@ -346,6 +346,7 @@ class MarketDataCollector:
             # 缓存1h K线数据，供其它模块复用
             self._cache_klines(symbol, "1h", ohlcv)
             await self._maybe_refresh_additional_timeframes(symbol)
+            await self._augment_snapshot_with_intraday(symbol, snapshot)
 
             return snapshot
 
@@ -428,7 +429,6 @@ class MarketDataCollector:
             if short_summary:
                 snapshot["short_term"] = short_summary
                 self._intraday_cache[(symbol, "5m")] = short_summary
-
             mid_summary = await self._get_intraday_summary(symbol, "15m")
             if mid_summary:
                 snapshot["mid_term"] = mid_summary

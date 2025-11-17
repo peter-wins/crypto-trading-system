@@ -86,6 +86,7 @@ class LLMTrader:
         self.memory = memory_retrieval
         self.max_tool_iterations = max_tool_iterations
         self.market_collector = None  # optional: set by builder if needed
+        self.min_risk_reward = Decimal("1.2")
 
     async def batch_generate_signals_with_regime(
         self,
@@ -862,6 +863,15 @@ class LLMTrader:
                     signal_type_str = signal_dict.get("signal_type", "hold")
                     signal_type = _parse_signal_type(signal_type_str)
 
+                    # 入场类信号需满足最小风险收益比
+                    if not self._validate_signal_constraints(signal_dict, signal_type):
+                        logger.warning(
+                            "%s 信号被丢弃: 不满足风险收益或风控约束 (%s)",
+                            llm_symbol,
+                            signal_type.value,
+                        )
+                        continue
+
                     # 生成时间戳
                     now = datetime.now(tz=timezone.utc)
                     timestamp = int(now.timestamp() * 1000)
@@ -925,6 +935,56 @@ class LLMTrader:
             return {symbol: None for symbol in expected_symbols}
 
         return signals
+
+    def _validate_signal_constraints(
+        self,
+        raw_signal: Dict[str, Any],
+        signal_type: SignalType,
+    ) -> bool:
+        """
+        对 LLM 输出进行基础风控，例如风险收益比检验。
+        仅对入场信号强制验证，出场/hold 姑且放行。
+        """
+        if signal_type not in {SignalType.ENTER_LONG, SignalType.ENTER_SHORT}:
+            return True
+
+        entry = raw_signal.get("suggested_price")
+        stop = raw_signal.get("stop_loss")
+        target = raw_signal.get("take_profit")
+
+        if entry is None or stop is None or target is None:
+            logger.warning("LLM 入场信号缺少价格/止损/止盈，自动丢弃。")
+            return False
+
+        entry_price = _to_decimal(entry, Decimal("0"))
+        stop_price = _to_decimal(stop, Decimal("0"))
+        target_price = _to_decimal(target, Decimal("0"))
+
+        if entry_price <= 0 or stop_price <= 0 or target_price <= 0:
+            logger.warning("LLM 入场信号价格参数异常，自动丢弃。")
+            return False
+
+        if signal_type == SignalType.ENTER_LONG:
+            risk = entry_price - stop_price
+            reward = target_price - entry_price
+        else:
+            risk = stop_price - entry_price
+            reward = entry_price - target_price
+
+        if risk <= 0 or reward <= 0:
+            logger.warning("LLM 入场信号的风险或收益方向错误，自动丢弃。")
+            return False
+
+        ratio = reward / risk
+        if ratio < self.min_risk_reward:
+            logger.warning(
+                "LLM 入场信号风险收益比 %.2f 低于阈值 %.2f",
+                ratio,
+                self.min_risk_reward,
+            )
+            return False
+
+        return True
 
     async def _chat_with_tools(self, messages: List[Message]) -> LLMResponse:
         """Standard tool-handling loop for the trader."""

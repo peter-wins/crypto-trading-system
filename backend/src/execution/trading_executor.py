@@ -701,8 +701,11 @@ class TradingExecutor:
         if not account_sync:
             return
 
-        exit_price = order.average or order.price or fallback_price or pre_position.current_price
+        # 优先使用订单的实际成交价，其次使用下单时的市价快照 (fallback_price)
+        # 注意：千万不要使用 pre_position.current_price，那是开仓价不是平仓价！
+        exit_price = order.average or order.price or fallback_price
         if exit_price is None:
+            # 如果都没有，使用当前市价作为最后兜底
             exit_price = fallback_price
         exit_price = Decimal(str(exit_price))
 

@@ -749,14 +749,55 @@ class AccountSyncService:
                 if change.change_type == 'closed':
                     position.entry_fee = Decimal('0')
 
+            # 尝试从交易所获取实际成交记录，覆盖预登记的估计值
+            exit_price_to_use = change.exit_price
+            exit_time_to_use = change.exit_time
+            exit_order_id_to_use = change.exit_order_id
+            close_reason_to_use = change.reason
+
+            try:
+                # 计算查询起始时间（从持仓更新时间开始）
+                since_time = position.updated_at or position.opened_at
+                if since_time and since_time.tzinfo is None:
+                    since_time = since_time.replace(tzinfo=timezone.utc)
+
+                # 获取实际成交摘要
+                summary = await self._summarize_close_trades(
+                    symbol=change.symbol,
+                    position_side=change.side,
+                    since_time=since_time,
+                )
+
+                if summary:
+                    # 使用实际成交数据覆盖预登记值
+                    exit_price_to_use = summary["avg_price"]
+                    exit_time_to_use = summary["exit_time"].replace(tzinfo=None) if summary["exit_time"] else exit_time_to_use
+                    exit_order_id_to_use = summary["order_id"] or exit_order_id_to_use
+                    close_reason_to_use = summary["reason"] or close_reason_to_use
+                    fee_to_use = summary["total_fee"] + entry_fee_total  # 使用实际手续费
+                    logger.debug(
+                        "使用实际成交数据: %s %s price=%s (预登记价格=%s)",
+                        change.symbol, change.side, exit_price_to_use, change.exit_price
+                    )
+                else:
+                    logger.debug(
+                        "未找到实际成交记录，使用预登记数据: %s %s price=%s",
+                        change.symbol, change.side, change.exit_price
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "获取实际成交记录失败，使用预登记数据: %s %s, error: %s",
+                    change.symbol, change.side, exc
+                )
+
             # 保存到 closed_positions 表
             await dao.save_closed_position(
                 position=position,
-                exit_order_id=change.exit_order_id,
-                exit_price=change.exit_price,
-                exit_time=change.exit_time,
+                exit_order_id=exit_order_id_to_use,
+                exit_price=exit_price_to_use,
+                exit_time=exit_time_to_use,
                 fee=fee_to_use,
-                close_reason=change.reason
+                close_reason=close_reason_to_use
             )
 
             # 如果是完全平仓，删除持仓记录
