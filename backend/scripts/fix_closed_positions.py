@@ -48,6 +48,18 @@ async def fix_closed_positions(dry_run: bool = True):
     exchange_config = config.get_exchange_config("binance")
     print(f"交易所: {exchange_config.name}, Testnet: {exchange_config.testnet}")
 
+    # 预初始化 exchange 连接（避免后续首次调用时卡住）
+    print("初始化交易所连接...")
+    try:
+        await asyncio.wait_for(exchange_service._get_exchange(), timeout=30.0)
+        print("✓ 交易所连接成功")
+    except asyncio.TimeoutError:
+        print("❌ 交易所连接超时（30秒）")
+        raise
+    except Exception as exc:
+        print(f"❌ 交易所连接失败: {exc}")
+        raise
+
     try:
         print("连接数据库...")
         async with db_manager.get_session() as session:
@@ -102,12 +114,23 @@ async def fix_closed_positions(dry_run: bool = True):
                     since_ms = int((exit_time.timestamp() - 1800) * 1000)  # 前30分钟
 
                     try:
-                        trades = await exchange_service.fetch_my_trades(
-                            symbol=pos.symbol,
-                            since=since_ms,
-                            limit=100
+                        print(f"  调用 fetch_my_trades: symbol={pos.symbol}, since={since_ms}")
+                        trades = await asyncio.wait_for(
+                            exchange_service.fetch_my_trades(
+                                symbol=pos.symbol,
+                                since=since_ms,
+                                limit=100
+                            ),
+                            timeout=15.0  # 15秒超时
                         )
+                        print(f"  ✓ 获取到 {len(trades)} 条成交记录")
+                    except asyncio.TimeoutError:
+                        print(f"  ⏱ 获取成交记录超时（15秒）")
+                        logger.warning(f"  获取成交记录超时")
+                        error_count += 1
+                        continue
                     except Exception as e:
+                        print(f"  ❌ 获取成交记录失败: {e}")
                         logger.warning(f"  获取成交记录失败: {e}")
                         error_count += 1
                         continue
@@ -165,11 +188,14 @@ async def fix_closed_positions(dry_run: bool = True):
                     price_diff = abs(actual_exit_price - current_exit_price)
                     price_diff_pct = (price_diff / current_exit_price * 100) if current_exit_price > 0 else 0
 
+                    print(f"  实际成交: {len(close_trades)} 笔, 总量={total_amount}, 均价={actual_exit_price:.2f}")
+                    print(f"  价格差异: {price_diff:.2f} ({price_diff_pct:.2f}%)")
                     logger.info(f"  实际成交: {len(close_trades)} 笔, 总量={total_amount}, 均价={actual_exit_price:.2f}")
                     logger.info(f"  价格差异: {price_diff:.2f} ({price_diff_pct:.2f}%)")
 
                     # 如果价格差异小于0.1%，跳过
                     if price_diff_pct < 0.1:
+                        print(f"  ✓ 价格差异很小(<0.1%)，无需修复")
                         logger.info(f"  价格差异很小，无需修复")
                         skipped_count += 1
                         continue
@@ -188,6 +214,7 @@ async def fix_closed_positions(dry_run: bool = True):
                     old_pnl = Decimal(str(pos.realized_pnl))
                     pnl_diff = new_pnl - old_pnl
 
+                    print(f"  ⚠ PNL变化: {old_pnl:.2f} -> {new_pnl:.2f} (差异: {pnl_diff:+.2f})")
                     logger.info(f"  PNL变化: {old_pnl:.2f} -> {new_pnl:.2f} (差异: {pnl_diff:+.2f})")
 
                     # 更新数据库
@@ -210,8 +237,10 @@ async def fix_closed_positions(dry_run: bool = True):
                             }
                         )
                         await session.commit()
+                        print(f"  ✅ 已修复")
                         logger.info(f"  ✅ 已修复")
                     else:
+                        print(f"  🔍 [DRY-RUN] 将会修复此记录")
                         logger.info(f"  🔍 [DRY-RUN] 将会修复此记录")
 
                     fixed_count += 1
@@ -220,6 +249,18 @@ async def fix_closed_positions(dry_run: bool = True):
                     logger.error(f"  ❌ 处理失败: {e}", exc_info=True)
                     error_count += 1
                     continue
+
+            print(f"\n" + "=" * 60)
+            if dry_run:
+                print(f"DRY-RUN 模式完成 (未实际修改数据库):")
+            else:
+                print(f"修复完成:")
+            print(f"  需要修复: {fixed_count} 条")
+            print(f"  跳过: {skipped_count} 条")
+            print(f"  错误: {error_count} 条")
+            if dry_run and fixed_count > 0:
+                print(f"\n如需实际修复，请运行: python scripts/fix_closed_positions.py --apply")
+            print("=" * 60)
 
             logger.info(f"\n" + "=" * 60)
             if dry_run:
