@@ -12,28 +12,33 @@ crypto-trading-system/
 │   │   ├── core/             # 核心配置和工具
 │   │   ├── decision/         # AI决策层
 │   │   ├── execution/        # 交易执行
-│   │   ├── perception/       # 市场感知
+│   │   ├── learning/         # 学习模块
 │   │   ├── memory/           # 记忆系统
-│   │   └── models/           # 数据模型
+│   │   ├── perception/       # 市场感知
+│   │   ├── services/         # 外部服务与适配器
+│   │   ├── utils/            # 通用工具
+│   │   └── src/              # 兼容层/迁移中的代码
 │   ├── tests/                # 测试代码
 │   ├── main.py               # 主入口
 │   ├── requirements.txt      # Python依赖
 │   └── README.md             # 后端文档
-│
+
 ├── frontend/                   # 前端应用 (Next.js)
 │   ├── src/                   # React组件和页面
 │   ├── public/                # 静态资源
 │   ├── package.json           # Node.js依赖
 │   └── README.md              # 前端文档
-│
+
 ├── config/                     # 配置文件
 ├── docker/                     # Docker配置
 ├── docs/                       # 项目文档
-├── logs/                       # 日志文件
 ├── scripts/                    # 工具脚本
-├── .env                        # 环境变量配置
-├── docker-compose.yml          # Docker编排
-└── README.md                   # 本文件
+├── .env.example                # 环境变量模板（复制为 .env 使用）
+├── .gitignore                  # Git忽略配置
+├── docker-compose.yml          # Docker编排（生产/通用）
+├── docker-compose.dev.yml      # Docker编排（开发）
+├── README.md                   # 项目说明
+└── CLAUDE.md                   # AI 开发指南
 
 ```
 
