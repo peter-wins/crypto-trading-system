@@ -13,6 +13,7 @@ crypto-trading-system/
 │   │   ├── decision/         # AI决策层
 │   │   ├── execution/        # 交易执行
 │   │   ├── learning/         # 学习模块
+│   │   ├── models/           # 领域模型与交易实体
 │   │   ├── memory/           # 记忆系统
 │   │   ├── perception/       # 市场感知
 │   │   ├── services/         # 外部服务与适配器

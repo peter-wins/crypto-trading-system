@@ -96,7 +96,7 @@ data/
 *.csv
 *.parquet
 
-# Model files
-models/
+# Model files (root-level artifacts only; keep code under backend/src/models tracked)
+/models/
 *.pkl
 *.joblib
