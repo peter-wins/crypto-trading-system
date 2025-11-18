@@ -525,40 +525,10 @@ class LLMTrader:
                 direction = "上升" if plus_di > minus_di else "下降"
                 lines.append(f"  ADX(14): {adx:.2f} ({trend_strength}, {direction})")
 
-            if snapshot.get("support"):
-                support = float(snapshot["support"])
-                dist_support = snapshot.get("distance_to_support_pct")
-                dist_text = f"{dist_support:.2f}%" if isinstance(dist_support, (int, float)) else "未知"
-                lines.append(f"  支撑: {support:.2f} (距现价 {dist_text})")
-            if snapshot.get("resistance"):
-                resistance = float(snapshot["resistance"])
-                dist_res = snapshot.get("distance_to_resistance_pct")
-                dist_res_text = f"{dist_res:.2f}%" if isinstance(dist_res, (int, float)) else "未知"
-                lines.append(f"  阻力: {resistance:.2f} (距现价 {dist_res_text})")
             if snapshot.get("volatility_state"):
                 lines.append(f"  波动状态: {snapshot.get('volatility_state')}")
             if snapshot.get("volume_state"):
                 lines.append(f"  成交量: {snapshot.get('volume_state')}")
-
-            short_term = snapshot.get("short_term")
-            if not short_term and symbol:
-                short_term = self._get_intraday_from_collector(symbol, "5m")
-            if short_term:
-                lines.append(
-                    f"  [5m] RSI={short_term.get('rsi', 0):.1f}, "
-                    f"MA20={short_term.get('ma20', 0):.0f}({short_term.get('price_vs_ma20', '')}), "
-                    f"波动={short_term.get('volatility')}, 量能={short_term.get('volume_state')}"
-                )
-
-            mid_term = snapshot.get("mid_term")
-            if not mid_term and symbol:
-                mid_term = self._get_intraday_from_collector(symbol, "15m")
-            if mid_term:
-                lines.append(
-                    f"  [15m] RSI={mid_term.get('rsi', 0):.1f}, "
-                    f"MA20={mid_term.get('ma20', 0):.0f}({mid_term.get('price_vs_ma20', '')}), "
-                    f"波动={mid_term.get('volatility')}, 量能={mid_term.get('volume_state')}"
-                )
 
             return "\n".join(lines)
 
@@ -583,26 +553,39 @@ class LLMTrader:
                 context["波动状态"] = snapshot["volatility_state"]
             if snapshot.get("volume_state"):
                 context["量能状态"] = snapshot["volume_state"]
-            if snapshot.get("support"):
-                context["支撑位"] = f"{float(snapshot['support']):,.2f}"
+            support = snapshot.get("support")
+            resistance = snapshot.get("resistance")
+            support_parts = []
+            if support:
                 dist = snapshot.get("distance_to_support_pct")
-                if isinstance(dist, (int, float)):
-                    context["距支撑"] = f"{dist:.2f}%"
-            if snapshot.get("resistance"):
-                context["阻力位"] = f"{float(snapshot['resistance']):,.2f}"
+                dist_text = f"{dist:.2f}%" if isinstance(dist, (int, float)) else "未知"
+                support_parts.append(f"S={float(support):,.2f} (距 {dist_text})")
+            if resistance:
                 dist = snapshot.get("distance_to_resistance_pct")
-                if isinstance(dist, (int, float)):
-                    context["距阻力"] = f"{dist:.2f}%"
+                dist_text = f"{dist:.2f}%" if isinstance(dist, (int, float)) else "未知"
+                support_parts.append(f"R={float(resistance):,.2f} (距 {dist_text})")
+            if support_parts:
+                context["支撑/阻力"] = " | ".join(support_parts)
+
             short_term = snapshot.get("short_term") or self._get_intraday_from_collector(symbol, "5m")
-            if short_term:
-                context["5m_RSI"] = f"{short_term.get('rsi', 0):.1f}"
-                context["5m_波动"] = short_term.get("volatility", "")
-                context["5m_量能"] = short_term.get("volume_state", "")
             mid_term = snapshot.get("mid_term") or self._get_intraday_from_collector(symbol, "15m")
+            intraday_segments = []
+            if short_term:
+                intraday_segments.append(
+                    "5m "
+                    f"RSI={short_term.get('rsi', 0):.1f}, "
+                    f"波动={short_term.get('volatility', '')}, "
+                    f"量能={short_term.get('volume_state', '')}"
+                )
             if mid_term:
-                context["15m_RSI"] = f"{mid_term.get('rsi', 0):.1f}"
-                context["15m_波动"] = mid_term.get("volatility", "")
-                context["15m_量能"] = mid_term.get("volume_state", "")
+                intraday_segments.append(
+                    "15m "
+                    f"RSI={mid_term.get('rsi', 0):.1f}, "
+                    f"波动={mid_term.get('volatility', '')}, "
+                    f"量能={mid_term.get('volume_state', '')}"
+                )
+            if intraday_segments:
+                context["短周期动能"] = " / ".join(intraday_segments)
         except Exception as exc:  # pylint:disable=broad-except
             logger.debug("提取结构化指标失败 %s: %s", symbol, exc)
         return context
