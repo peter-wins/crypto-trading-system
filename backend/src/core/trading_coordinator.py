@@ -126,6 +126,18 @@ class TradingCoordinator:
 
                 # 1. 收集市场数据快照
                 snapshots = await self._collect_snapshots()
+
+                if self.layered_coordinator:
+                    shock_reason = self.layered_coordinator.detect_market_shock(snapshots)
+                    if shock_reason:
+                        self.logger.warning(
+                            "⚠️ 战术层检测到异常波动，提前触发战略层: %s",
+                            shock_reason,
+                        )
+                        await self._run_strategist_cycle(trigger_reason=shock_reason)
+                        trader_cycles = 0
+                        snapshots = await self._collect_snapshots()
+
                 if not snapshots:
                     self.logger.warning("所有交易对都没有缓存数据，跳过本轮")
                     await self._interruptible_sleep(max(1, self.config.trader_interval))
@@ -353,10 +365,13 @@ class TradingCoordinator:
             self.logger.error("战略层分析失败: %s", exc, exc_info=True)
             self.logger.warning("将继续运行，但可能影响决策质量")
 
-    async def _run_strategist_cycle(self):
+    async def _run_strategist_cycle(self, trigger_reason: Optional[str] = None):
         """定期运行战略层分析"""
         self.logger.info("\n" + "=" * 60)
-        self.logger.info("执行战略层分析")
+        if trigger_reason:
+            self.logger.info("执行战略层分析 (触发: %s)", trigger_reason)
+        else:
+            self.logger.info("执行战略层分析")
         self.logger.info("=" * 60)
 
         try:
@@ -367,7 +382,10 @@ class TradingCoordinator:
             finally:
                 await crypto_collector.close()
 
-            await self.layered_coordinator.run_strategist_cycle(crypto_overview)
+            await self.layered_coordinator.run_strategist_cycle(
+                crypto_overview,
+                trigger_reason=trigger_reason,
+            )
             self.logger.info("✅ 战略层分析完成")
         except Exception as exc:
             self.logger.error("战略层分析失败: %s", exc, exc_info=True)

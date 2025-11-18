@@ -10,8 +10,11 @@ export function Providers({ children }: { children: React.ReactNode }) {
       new QueryClient({
         defaultOptions: {
           queries: {
-            staleTime: 60 * 1000, // 1分钟
+            staleTime: 5 * 60 * 1000, // 5分钟 - 数据在此期间被认为是新鲜的
+            cacheTime: 10 * 60 * 1000, // 10分钟 - 未使用的数据保留在缓存中的时间
             refetchOnWindowFocus: false,
+            retry: 2, // 失败时重试2次
+            retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 30000), // 指数退避
           },
         },
       })

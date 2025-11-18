@@ -5,12 +5,13 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { useMultipleTickers } from "@/lib/hooks/useMarket"
 import { formatSymbol } from "@/lib/utils/symbol"
 import { TrendingUp, TrendingDown } from "lucide-react"
+import { memo } from "react"
 
 interface MarketTickerCardsProps {
   symbols: string[]
 }
 
-export function MarketTickerCards({ symbols }: MarketTickerCardsProps) {
+export const MarketTickerCards = memo(function MarketTickerCards({ symbols }: MarketTickerCardsProps) {
   const { data: tickers, isLoading } = useMultipleTickers(symbols)
 
   if (isLoading) {
@@ -35,12 +36,10 @@ export function MarketTickerCards({ symbols }: MarketTickerCardsProps) {
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">
       {tickers.map((ticker) => {
         const isPositive = (ticker.change_percentage_24h || 0) >= 0
-        const changeColor = isPositive
-          ? "text-green-600 dark:text-green-400"
-          : "text-red-600 dark:text-red-400"
+        const changeColor = isPositive ? "text-profit" : "text-loss"
 
         return (
-          <Card key={ticker.symbol} className="overflow-hidden">
+          <Card key={ticker.symbol} className="overflow-hidden hover:shadow-md transition-shadow cursor-pointer">
             <CardContent className="p-4">
               <div className="space-y-2">
                 {/* 交易对 */}
@@ -75,4 +74,7 @@ export function MarketTickerCards({ symbols }: MarketTickerCardsProps) {
       })}
     </div>
   )
-}
+}, (prevProps, nextProps) => {
+  // 仅当 symbols 数组内容改变时重新渲染
+  return JSON.stringify(prevProps.symbols) === JSON.stringify(nextProps.symbols)
+})

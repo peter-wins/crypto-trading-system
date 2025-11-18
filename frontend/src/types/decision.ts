@@ -12,15 +12,27 @@ export type DecisionType = z.infer<typeof DecisionTypeSchema>
 export const SignalTypeSchema = z.enum(["ENTER_LONG", "EXIT_LONG", "ENTER_SHORT", "EXIT_SHORT", "HOLD"])
 export type SignalType = z.infer<typeof SignalTypeSchema>
 
+// 风险等级
+export const RiskLevelSchema = z.enum(["LOW", "MEDIUM", "HIGH"])
+export type RiskLevel = z.infer<typeof RiskLevelSchema>
+
+// 恐慌贪婪标签
+export const FearGreedLabelSchema = z.enum(["EXTREME_FEAR", "FEAR", "NEUTRAL", "GREED", "EXTREME_GREED"])
+export type FearGreedLabel = z.infer<typeof FearGreedLabelSchema>
+
 // 决策上下文
 export const DecisionContextSchema = z.object({
   // 基本信息
   symbol: z.string().optional(),
   regime: z.string().optional(),
   trading_mode: z.string().optional(),
-  risk_level: z.string().optional(),
+  risk_level: z.string().optional(), // 保持字符串以兼容后端
   cash_ratio: z.number().optional(),
   position_multiplier: z.number().optional(),
+
+  // 战术决策特有字段
+  bias: z.string().optional(), // 战术偏向 (bearish/bullish)
+  market_structure: z.string().optional(), // 市场结构 (extreme/normal)
 
   // 投资组合
   portfolio: z.object({
@@ -37,7 +49,7 @@ export const DecisionContextSchema = z.object({
 
   // 现有持仓
   existing_position: z.object({
-    side: z.string(),
+    side: z.string(), // 保持字符串,因为后端返回小写 "buy"/"sell"
     amount: z.string(),
     leverage: z.number().nullable().optional(),
     entry_price: z.string(),
@@ -49,7 +61,7 @@ export const DecisionContextSchema = z.object({
   // 环境数据（战略决策）
   sentiment: z.object({
     fear_greed_index: z.number().nullable(),
-    fear_greed_label: z.string().nullable(),
+    fear_greed_label: z.string().nullable(), // 保持字符串以兼容后端
   }).optional(),
   macro_data: z.object({
     fed_rate: z.number().nullable(),
@@ -57,7 +69,7 @@ export const DecisionContextSchema = z.object({
   }).optional(),
   environment_summary: z.string().optional().nullable(),
   environment_data_completeness: z.number().optional().nullable(),
-}).passthrough()
+}).passthrough() // 改回 passthrough 以允许后端的额外字段
 
 export type DecisionContext = z.infer<typeof DecisionContextSchema>
 
@@ -73,8 +85,8 @@ export const DecisionRecordSchema = z.object({
   context: DecisionContextSchema.nullable().optional(),
   tool_calls: z.array(z.object({
     name: z.string(),
-    arguments: z.record(z.any()),
-    result: z.any().nullable().optional(),
+    arguments: z.record(z.string(), z.unknown()), // 使用 unknown 替代 any
+    result: z.unknown().nullable().optional(), // 使用 unknown 替代 any
   })).nullable().optional(),
   outcome: z.string().nullable().optional(),
   model_used: z.string().nullable().optional(),

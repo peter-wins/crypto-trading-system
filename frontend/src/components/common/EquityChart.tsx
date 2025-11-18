@@ -2,26 +2,57 @@
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
-import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid } from "recharts"
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  Legend,
+} from "recharts"
+import { formatCurrency } from "@/lib/utils"
 import { format } from "date-fns"
-import { zhCN } from "date-fns/locale"
-import type { EquityPoint } from "@/lib/api/performance"
+import { memo } from "react"
+
+interface EquityPoint {
+  timestamp: string
+  value: number
+}
 
 interface EquityChartProps {
   data: EquityPoint[] | undefined
-  isLoading: boolean
+  isLoading?: boolean
+  title?: string
+  description?: string
+  height?: number
+  className?: string
+  showLegend?: boolean
 }
 
-export function EquityChart({ data, isLoading }: EquityChartProps) {
+/**
+ * 统一的净值曲线组件
+ * 支持单天和多天数据的智能展示
+ */
+export const EquityChart = memo(function EquityChart({
+  data,
+  isLoading = false,
+  title = "净值曲线",
+  description = "查看资产净值随时间的变化趋势",
+  height = 300,
+  className = "col-span-4",
+  showLegend = false,
+}: EquityChartProps) {
   if (isLoading) {
     return (
-      <Card className="col-span-full">
+      <Card className={className}>
         <CardHeader>
           <Skeleton className="h-6 w-32" />
           <Skeleton className="h-4 w-48 mt-2" />
         </CardHeader>
         <CardContent>
-          <Skeleton className="h-[400px] w-full" />
+          <Skeleton className={`h-[${height}px] w-full`} />
         </CardContent>
       </Card>
     )
@@ -29,24 +60,21 @@ export function EquityChart({ data, isLoading }: EquityChartProps) {
 
   if (!data || data.length === 0) {
     return (
-      <Card className="col-span-full">
+      <Card className={className}>
         <CardHeader>
-          <CardTitle>净值曲线</CardTitle>
-          <CardDescription>
-            查看资产净值随时间的变化趋势
-          </CardDescription>
+          <CardTitle>{title}</CardTitle>
+          {description && <CardDescription>{description}</CardDescription>}
         </CardHeader>
         <CardContent>
-          <div className="h-[400px] flex items-center justify-center text-muted-foreground">
-            暂无净值数据
+          <div className={`flex items-center justify-center h-[${height}px]`}>
+            <p className="text-muted-foreground">暂无数据</p>
           </div>
         </CardContent>
       </Card>
     )
   }
 
-  // 格式化数据用于图表显示
-  // 按日期分组数据
+  // 转换数据格式 - 按日期分组数据
   const groupedByDay = new Map<string, EquityPoint[]>()
 
   data.forEach(point => {
@@ -61,15 +89,16 @@ export function EquityChart({ data, isLoading }: EquityChartProps) {
   const isSameDay = groupedByDay.size === 1
 
   // 根据是否同一天选择不同的展示策略
-  let chartData: { timestamp: string; value: number }[] = []
+  let chartData: { date: string; value: number; fullDate: string }[] = []
 
   if (isSameDay) {
     // 单天数据：显示所有时间点
     chartData = data.map((point) => {
       const date = new Date(point.timestamp)
       return {
-        timestamp: format(date, "HH:mm"),
+        date: format(date, "HH:mm"),
         value: point.value,
+        fullDate: date.toISOString(),
       }
     })
   } else {
@@ -87,57 +116,45 @@ export function EquityChart({ data, isLoading }: EquityChartProps) {
       const point = index === 0 ? sortedPoints[0] : sortedPoints[sortedPoints.length - 1]
       const pointDate = new Date(point.timestamp)
       chartData.push({
-        timestamp: format(pointDate, "MM/dd"),
+        date: format(pointDate, "MM/dd"),
         value: point.value,
+        fullDate: pointDate.toISOString(),
       })
     })
   }
 
-  // 计算统计信息
-  const firstValue = data[0].value
-  const lastValue = data[data.length - 1].value
-  const totalReturn = lastValue - firstValue
-  const totalReturnPercentage = ((totalReturn / firstValue) * 100).toFixed(2)
-  const isPositive = totalReturn >= 0
-
   return (
-    <Card className="col-span-full">
+    <Card className={className}>
       <CardHeader>
-        <CardTitle>净值曲线</CardTitle>
-        <CardDescription>
-          钱包余额变化趋势
-        </CardDescription>
+        <CardTitle>{title}</CardTitle>
+        {description && <CardDescription>{description}</CardDescription>}
       </CardHeader>
       <CardContent>
-        <ResponsiveContainer width="100%" height={400}>
-          <LineChart
-            data={chartData}
-            margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
-          >
+        <ResponsiveContainer width="100%" height={height}>
+          <LineChart data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
             <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
             <XAxis
-              dataKey="timestamp"
-              tick={{ fontSize: 12 }}
-              tickLine={false}
-              className="text-muted-foreground"
+              dataKey="date"
+              className="text-xs"
+              tick={{ fill: "currentColor" }}
               interval="preserveStartEnd"
               tickMargin={5}
             />
             <YAxis
-              tick={{ fontSize: 12 }}
-              tickLine={false}
-              className="text-muted-foreground"
+              className="text-xs"
+              tick={{ fill: "currentColor" }}
               tickFormatter={(value) => `$${(value / 1000).toFixed(0)}k`}
             />
             <Tooltip
               contentStyle={{
-                backgroundColor: 'hsl(var(--card))',
-                border: '1px solid hsl(var(--border))',
-                borderRadius: '6px',
+                backgroundColor: "hsl(var(--card))",
+                border: "1px solid hsl(var(--border))",
+                borderRadius: "0.5rem",
               }}
-              labelStyle={{ color: 'hsl(var(--foreground))' }}
-              formatter={(value: number) => [`$${value.toFixed(2)}`, '净值']}
+              labelStyle={{ color: "hsl(var(--foreground))" }}
+              formatter={(value: number) => [formatCurrency(value), "净值"]}
             />
+            {showLegend && <Legend />}
             <Line
               type="monotone"
               dataKey="value"
@@ -145,10 +162,11 @@ export function EquityChart({ data, isLoading }: EquityChartProps) {
               strokeWidth={2}
               dot={false}
               activeDot={{ r: 4 }}
+              name="账户净值"
             />
           </LineChart>
         </ResponsiveContainer>
       </CardContent>
     </Card>
   )
-}
+})

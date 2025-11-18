@@ -805,11 +805,6 @@ class TradingDAO:
             if filters:
                 query = query.where(and_(*filters))
 
-            exchange_filter_name = exchange_name or self.default_exchange_name
-            if exchange_filter_name:
-                exchange_id = await self._get_or_create_exchange_id(exchange_filter_name)
-                query = query.where(PortfolioSnapshotModel.exchange_id == exchange_id)
-
             # 仅返回指定交易所的数据
             exchange_filter_name = exchange_name or self.default_exchange_name
             if exchange_filter_name:
@@ -888,11 +883,22 @@ class TradingDAO:
                     if opened_at.tzinfo is not None:
                         # 如果 opened_at 有时区，移除时区信息
                         opened_at = opened_at.replace(tzinfo=None)
+
+                    exit_time_normalized = exit_time
                     if exit_time.tzinfo is not None:
                         # 如果 exit_time 有时区，移除时区信息
-                        exit_time = exit_time.replace(tzinfo=None)
+                        exit_time_normalized = exit_time.replace(tzinfo=None)
 
-                    holding_duration = int((exit_time - opened_at).total_seconds())
+                    holding_duration = int((exit_time_normalized - opened_at).total_seconds())
+
+                    # 保护：如果持仓时间为负数，说明时间顺序有问题
+                    if holding_duration < 0:
+                        self.logger.error(
+                            f"持仓时间为负数! opened_at={opened_at}, exit_time={exit_time_normalized}, "
+                            f"duration={holding_duration}s. 将使用绝对值."
+                        )
+                        holding_duration = abs(holding_duration)
+
                 except Exception as e:
                     self.logger.warning(f"计算持仓时长失败: {e}")
                     holding_duration = None

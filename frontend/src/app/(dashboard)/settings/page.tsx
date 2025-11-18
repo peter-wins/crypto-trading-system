@@ -127,9 +127,9 @@ export default function SettingsPage() {
                   ? "bg-green-50 dark:bg-green-950 border-green-200 dark:border-green-800"
                   : "bg-red-50 dark:bg-red-950 border-red-200 dark:border-red-800"}>
                   {message.type === 'success' ? (
-                    <CheckCircle2 className="h-4 w-4 text-green-600 dark:text-green-400" />
+                    <CheckCircle2 className="h-4 w-4 text-profit" />
                   ) : (
-                    <XCircle className="h-4 w-4 text-red-600 dark:text-red-400" />
+                    <XCircle className="h-4 w-4 text-loss" />
                   )}
                   <AlertDescription className={message.type === 'success'
                     ? "text-green-800 dark:text-green-200"

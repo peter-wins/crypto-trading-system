@@ -238,6 +238,22 @@ class Config(BaseSettings):
         default=180,
         description="战术层运行间隔(秒)"
     )
+    strategist_shock_enabled: bool = Field(
+        default=True,
+        description="是否启用战术触发战略层的异常刷新"
+    )
+    strategist_shock_atr_multiple: float = Field(
+        default=2.0,
+        description="触发战略层刷新的ATR倍数阈值"
+    )
+    strategist_shock_min_move_pct: float = Field(
+        default=1.0,
+        description="触发战略层刷新的最小价格变动百分比(同方向)"
+    )
+    strategist_shock_cooldown: int = Field(
+        default=300,
+        description="异常触发后最短冷却时间(秒)"
+    )
     enable_news: bool = Field(
         default=False,
         description="是否启用新闻采集"

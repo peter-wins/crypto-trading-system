@@ -104,8 +104,8 @@ export function MarketTicker({ symbols }: MarketTickerProps) {
                     <Badge
                       variant={isPositive ? "default" : "destructive"}
                       className={isPositive
-                        ? "bg-green-600 dark:bg-green-500 hover:bg-green-700 dark:hover:bg-green-600 text-white border-0"
-                        : "bg-red-600 dark:bg-red-500 hover:bg-red-700 dark:hover:bg-red-600 text-white border-0"
+                        ? "bg-profit hover:bg-green-700 dark:hover:bg-green-600 text-white border-0"
+                        : "bg-loss hover:bg-red-700 dark:hover:bg-red-600 text-white border-0"
                       }
                     >
                       {isPositive ? '+' : ''}

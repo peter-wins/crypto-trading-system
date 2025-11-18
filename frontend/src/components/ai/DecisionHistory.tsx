@@ -16,6 +16,7 @@ import { zhCN } from "date-fns/locale"
 import { CheckCircle2, XCircle } from "lucide-react"
 import { getSignalLabel, getSignalColor } from "@/lib/utils/signal"
 import { formatSymbol } from "@/lib/utils/symbol"
+import { memo, useCallback } from "react"
 
 interface DecisionHistoryProps {
   decisions: DecisionRecord[]
@@ -23,11 +24,14 @@ interface DecisionHistoryProps {
   onDecisionClick?: (decision: DecisionRecord) => void
 }
 
-export function DecisionHistory({
+export const DecisionHistory = memo(function DecisionHistory({
   decisions,
   isLoading,
   onDecisionClick,
 }: DecisionHistoryProps) {
+  const handleDecisionClick = useCallback((decision: DecisionRecord) => {
+    onDecisionClick?.(decision)
+  }, [onDecisionClick])
   if (isLoading) {
     return (
       <Card>
@@ -81,7 +85,7 @@ export function DecisionHistory({
               <TableRow
                 key={decision.id}
                 className="cursor-pointer hover:bg-muted/50"
-                onClick={() => onDecisionClick?.(decision)}
+                onClick={() => handleDecisionClick(decision)}
               >
                 <TableCell className="font-medium">
                   {format(new Date(decision.timestamp), "MM-dd HH:mm", {
@@ -127,4 +131,4 @@ export function DecisionHistory({
       </CardContent>
     </Card>
   )
-}
+})

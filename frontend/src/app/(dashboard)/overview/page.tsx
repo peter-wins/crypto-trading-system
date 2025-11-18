@@ -2,7 +2,7 @@
 
 import { StatCard } from "@/components/ui/stat-card"
 import { PositionList } from "@/components/portfolio/PositionList"
-import { EquityChart } from "@/components/charts/EquityChart"
+import { EquityChart } from "@/components/common/EquityChart"
 import { DecisionLog } from "@/components/ai/DecisionLog"
 import { usePortfolio, usePositions, useEquityCurve } from "@/lib/hooks/usePortfolio"
 import { useDecisionHistory } from "@/lib/hooks/useDecisions"

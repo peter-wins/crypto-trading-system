@@ -40,10 +40,14 @@ export const OrderSchema = z.object({
 
 export type Order = z.infer<typeof OrderSchema>
 
+// 持仓方向 (与 OrderSide 相同但语义更明确)
+export const PositionSideSchema = z.enum(["BUY", "SELL"])
+export type PositionSide = z.infer<typeof PositionSideSchema>
+
 // 持仓
 export const PositionSchema = z.object({
   symbol: z.string(),
-  side: z.string(),
+  side: PositionSideSchema, // 使用严格的枚举类型
   amount: z.number(),
   entry_price: z.number(),
   average_price: z.number(),

@@ -466,6 +466,13 @@ class MarketDataCollector:
         adx_value = adx_data["adx"][-1] if adx_data.get("adx") else Decimal("0")
 
         price = closes[-1]
+        prev_price = closes[-2] if len(closes) > 1 else closes[-1]
+        change_abs = price - prev_price if prev_price else Decimal("0")
+        change_pct = (
+            ((price - prev_price) / prev_price) * 100
+            if prev_price not in (None, 0)
+            else Decimal("0")
+        )
         price_vs_ma = self._price_vs_ma(price, ma20)
         vol_state = self._volatility_label(float(atr_value / price)) if price else "未知"
         volume_state = self._volume_label(volumes)
@@ -473,6 +480,8 @@ class MarketDataCollector:
         return {
             "timeframe": timeframe,
             "price": float(price),
+            "change_abs": float(change_abs),
+            "change_pct": float(change_pct),
             "rsi": float(rsi_value),
             "ma20": float(ma20),
             "price_vs_ma20": price_vs_ma,

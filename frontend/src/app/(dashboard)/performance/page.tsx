@@ -2,7 +2,7 @@
 
 import { useState } from "react"
 import { MetricsCard } from "@/components/performance/MetricsCard"
-import { EquityChart } from "@/components/performance/EquityChart"
+import { EquityChart } from "@/components/common/EquityChart"
 import { TradesAnalysis } from "@/components/performance/TradesAnalysis"
 import { TimeRangeSelector, TimeRange, TimeRangeValue } from "@/components/performance/TimeRangeSelector"
 import { usePerformanceMetrics, useEquityCurve, useTradesStats } from "@/lib/hooks/usePerformance"
@@ -41,7 +41,13 @@ export default function PerformancePage() {
       <MetricsCard metrics={metrics} isLoading={metricsLoading} />
 
       {/* 净值曲线图表 */}
-      <EquityChart data={equityCurve} isLoading={equityLoading} />
+      <EquityChart
+        data={equityCurve}
+        isLoading={equityLoading}
+        height={400}
+        className="col-span-full"
+        description="钱包余额变化趋势"
+      />
 
       {/* 交易分析 */}
       <TradesAnalysis stats={tradesStats} isLoading={tradesLoading} />

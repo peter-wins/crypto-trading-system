@@ -449,6 +449,10 @@ class TradingSystemBuilder:
                 strategist_interval_seconds=self.config.strategist_interval,
                 trader_interval_seconds=self.config.trader_interval,
                 database_manager=self.db_manager,  # 传入数据库管理器用于保存决策
+                shock_detection_enabled=self.config.strategist_shock_enabled,
+                shock_atr_multiple=self.config.strategist_shock_atr_multiple,
+                shock_min_move_pct=self.config.strategist_shock_min_move_pct,
+                shock_cooldown_seconds=self.config.strategist_shock_cooldown,
             )
 
             self.logger.info(f"✓ [AI决策] 初始化完成 | 模型: {model_info}")

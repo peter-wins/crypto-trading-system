@@ -75,17 +75,17 @@ export default function TradingPage() {
 
   // 获取盈亏颜色
   const getPnlColor = (pnl: number) => {
-    if (pnl > 0) return "text-green-600 dark:text-green-400"
-    if (pnl < 0) return "text-red-600 dark:text-red-400"
+    if (pnl > 0) return "text-profit"
+    if (pnl < 0) return "text-loss"
     return "text-muted-foreground"
   }
 
   // 获取方向标签
   const getSideDisplay = (side: string) => {
     if (side === "buy") {
-      return <Badge className="bg-green-600 dark:bg-green-500 text-white">做多</Badge>
+      return <Badge className="bg-profit text-white">做多</Badge>
     } else {
-      return <Badge className="bg-red-600 dark:bg-red-500 text-white">做空</Badge>
+      return <Badge className="bg-loss text-white">做空</Badge>
     }
   }
 

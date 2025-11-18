@@ -38,6 +38,10 @@ class LayeredDecisionCoordinator:
         strategist_interval_seconds: int = 3600,  # 1小时
         trader_interval_seconds: int = 180,  # 3分钟
         database_manager: Optional[Any] = None,  # 数据库管理器
+        shock_detection_enabled: bool = True,
+        shock_atr_multiple: float = 2.0,
+        shock_min_move_pct: float = 1.0,
+        shock_cooldown_seconds: int = 300,
     ):
         self.strategist = strategist
         self.trader = trader
@@ -49,10 +53,16 @@ class LayeredDecisionCoordinator:
         # 缓存当前的市场状态判断
         self.current_regime: Optional[MarketRegime] = None
         self.last_strategist_run: Optional[datetime] = None
+        self.shock_detection_enabled = shock_detection_enabled
+        self.shock_atr_multiple = shock_atr_multiple
+        self.shock_min_move_pct = shock_min_move_pct
+        self.shock_cooldown_seconds = shock_cooldown_seconds
+        self.last_shock_trigger: Optional[datetime] = None
 
     async def run_strategist_cycle(
         self,
         crypto_overview: Optional[Dict[str, Any]] = None,
+        trigger_reason: Optional[str] = None,
     ) -> MarketRegime:
         """
         运行战略层分析周期
@@ -72,6 +82,8 @@ class LayeredDecisionCoordinator:
 
         logger.info("=" * 80)
         logger.info("战略层分析周期开始")
+        if trigger_reason:
+            logger.info("触发原因: %s", trigger_reason)
         logger.info("=" * 80)
 
         try:
@@ -101,6 +113,8 @@ class LayeredDecisionCoordinator:
             # 3. 缓存结果
             self.current_regime = regime
             self.last_strategist_run = datetime.now(timezone.utc)
+            if trigger_reason:
+                self.last_shock_trigger = self.last_strategist_run
 
             logger.info("战略层分析完成: %s", regime.get_summary())
             logger.info("有效期至: %s", datetime.fromtimestamp(regime.valid_until / 1000))
@@ -185,6 +199,60 @@ class LayeredDecisionCoordinator:
         except Exception as exc:
             logger.error(f"战术层决策失败: {exc}", exc_info=True)
             return {}
+
+    def detect_market_shock(
+        self,
+        snapshots: Dict[str, Dict[str, Any]],
+    ) -> Optional[str]:
+        """
+        检测短周期异常波动以触发战略层刷新。
+        使用 15m 行情：若价格变化超过 ATR 指定倍数且涨跌幅达到阈值，则返回原因。
+        """
+        if not self.shock_detection_enabled or not snapshots:
+            return None
+
+        now = datetime.now(timezone.utc)
+        if self.last_shock_trigger:
+            if (now - self.last_shock_trigger).total_seconds() < self.shock_cooldown_seconds:
+                return None
+
+        if self.last_strategist_run:
+            if (now - self.last_strategist_run).total_seconds() < self.shock_cooldown_seconds:
+                return None
+
+        for symbol, snapshot in snapshots.items():
+            mid_term = snapshot.get("mid_term") or {}
+            if not mid_term:
+                continue
+
+            change_abs = mid_term.get("change_abs")
+            atr_value = mid_term.get("atr")
+            change_pct = mid_term.get("change_pct")
+
+            if change_abs is None or atr_value in (None, 0):
+                continue
+
+            atr = float(atr_value)
+            if atr <= 0:
+                continue
+
+            abs_change = abs(float(change_abs))
+            pct_change = abs(float(change_pct or 0))
+
+            if pct_change < self.shock_min_move_pct:
+                continue
+
+            if abs_change >= self.shock_atr_multiple * atr:
+                ratio = abs_change / atr if atr else 0
+                direction = "上涨" if float(change_abs) > 0 else "下跌"
+                reason = (
+                    f"{symbol} 15m{direction}{float(change_pct or 0):+.2f}% "
+                    f"≈ {ratio:.1f}×ATR"
+                )
+                self.last_shock_trigger = now
+                return reason
+
+        return None
 
     async def start_dual_loop(
         self,

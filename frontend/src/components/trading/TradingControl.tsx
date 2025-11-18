@@ -37,7 +37,7 @@ export function TradingControl() {
           <Badge
             variant={isRunning ? "default" : "secondary"}
             className={isRunning
-              ? "bg-green-600 dark:bg-green-500 hover:bg-green-700 dark:hover:bg-green-600 text-white border-0"
+              ? "bg-profit hover:bg-green-700 dark:hover:bg-green-600 text-white border-0"
               : "bg-gray-400 dark:bg-gray-600 text-white border-0"
             }
           >

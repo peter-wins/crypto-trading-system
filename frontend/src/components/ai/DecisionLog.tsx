@@ -110,7 +110,7 @@ export function DecisionLog({ decisions, isLoading, limit = 5 }: DecisionLogProp
               <div className="flex items-center justify-between text-xs">
                 <span className={
                   decision.confidence >= 0.8
-                    ? "text-green-600 dark:text-green-400 font-medium"
+                    ? "text-profit font-medium"
                     : decision.confidence >= 0.6
                     ? "text-yellow-600 dark:text-yellow-400 font-medium"
                     : "text-orange-600 dark:text-orange-400 font-medium"

@@ -14,6 +14,7 @@ import { cn, formatCurrency, formatPercentage, isProfit } from "@/lib/utils"
 import { formatSymbol } from "@/lib/utils/symbol"
 import { TrendingUp, TrendingDown } from "lucide-react"
 import { Position } from "@/types/trading"
+import { memo, useCallback } from "react"
 
 interface PositionListProps {
   positions: Position[]
@@ -21,7 +22,10 @@ interface PositionListProps {
   onPositionClick?: (position: Position) => void
 }
 
-export function PositionList({ positions, isLoading, onPositionClick }: PositionListProps) {
+export const PositionList = memo(function PositionList({ positions, isLoading, onPositionClick }: PositionListProps) {
+  const handlePositionClick = useCallback((position: Position) => {
+    onPositionClick?.(position)
+  }, [onPositionClick])
   if (isLoading) {
     return (
       <Card>
@@ -79,7 +83,7 @@ export function PositionList({ positions, isLoading, onPositionClick }: Position
                 <TableRow
                   key={position.symbol}
                   className="cursor-pointer hover:bg-muted/50"
-                  onClick={() => onPositionClick?.(position)}
+                  onClick={() => handlePositionClick(position)}
                 >
                   <TableCell className="font-medium">
                     {formatSymbol(position.symbol)}
@@ -137,4 +141,4 @@ export function PositionList({ positions, isLoading, onPositionClick }: Position
       </CardContent>
     </Card>
   )
-}
+})
